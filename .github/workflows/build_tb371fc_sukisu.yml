@@ -14,10 +14,6 @@ jobs:
     timeout-minutes: 180
 
     env:
-      # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-      # Based on lss4/android_kernel_lenovo_paladin
-      # Target: Lenovo TB371FC / TB-Q706F / SM8250
-      # Compatible: ColorOS 15, HyperOS 3, Android 16
       KERNEL_REPO: https://github.com/lss4/android_kernel_lenovo_paladin.git
       KERNEL_BRANCH: "11"
       EROFS_REPO: https://github.com/lateautumn233/erofs_kernel_4_19.git
@@ -25,27 +21,15 @@ jobs:
       ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3.git
 
     steps:
-      # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-      # Based on lss4/android_kernel_lenovo_paladin
-      # Target: Lenovo TB371FC / TB-Q706F / SM8250
-      # Compatible: ColorOS 15, HyperOS 3, Android 16
       - name: Checkout workflow repository
         uses: actions/checkout@v4
 
-      # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-      # Based on lss4/android_kernel_lenovo_paladin
-      # Target: Lenovo TB371FC / TB-Q706F / SM8250
-      # Compatible: ColorOS 15, HyperOS 3, Android 16
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
           sudo apt-get clean
           df -h
 
-      # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-      # Based on lss4/android_kernel_lenovo_paladin
-      # Target: Lenovo TB371FC / TB-Q706F / SM8250
-      # Compatible: ColorOS 15, HyperOS 3, Android 16
       - name: Install basic dependencies
         run: |
           sudo apt-get update
@@ -56,20 +40,12 @@ jobs:
             clang lld llvm \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-      # Based on lss4/android_kernel_lenovo_paladin
-      # Target: Lenovo TB371FC / TB-Q706F / SM8250
-      # Compatible: ColorOS 15, HyperOS 3, Android 16
       - name: Clean old build artifacts
         run: |
-          rm -rf kernel out anykernel TB371FC_kernel.zip
+          rm -rf kernel out anykernel TB371FC_kernel.zip llvm-project
           mkdir -p out
           echo "=== 旧构建文件清理完成 ==="
 
-      # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-      # Based on lss4/android_kernel_lenovo_paladin
-      # Target: Lenovo TB371FC / TB-Q706F / SM8250
-      # Compatible: ColorOS 15, HyperOS 3, Android 16
       - name: Clone kernel source
         run: |
           git clone --depth=1 -b "${KERNEL_BRANCH}" "${KERNEL_REPO}" kernel
@@ -82,67 +58,27 @@ jobs:
           ls kernel/arch/arm64/configs/vendor/
           echo "=== 内核源码拉取完毕 ==="
 
-      # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-      # Based on lss4/android_kernel_lenovo_paladin
-      # Target: Lenovo TB371FC / TB-Q706F / SM8250
-      # Compatible: ColorOS 15, HyperOS 3, Android 16
       - name: Setup SukiSU-Ultra
         run: |
           cd kernel
-          KSU_OK=false
 
-          # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-          # Based on lss4/android_kernel_lenovo_paladin
-          # Target: Lenovo TB371FC / TB-Q706F / SM8250
-          # Compatible: ColorOS 15, HyperOS 3, Android 16
-          if curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
-               -o /tmp/ksu_setup.sh 2>/dev/null; then
-            echo "=== 下载 setup.sh 成功，检查内容 ==="
-            if [ -s /tmp/ksu_setup.sh ] && grep -q "kernelsu" /tmp/ksu_setup.sh 2>/dev/null; then
-              echo "=== setup.sh 内容有效，执行 ==="
-              if bash /tmp/ksu_setup.sh main; then
-                KSU_OK=true
-              fi
-            fi
-          fi
-
-          # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-          # Based on lss4/android_kernel_lenovo_paladin
-          # Target: Lenovo TB371FC / TB-Q706F / SM8250
-          # Compatible: ColorOS 15, HyperOS 3, Android 16
-          if [ "$KSU_OK" = false ] || [ ! -d drivers/kernelsu ]; then
-            echo "⚠️ setup.sh 执行失败或未生成目录，使用手动克隆"
+          if ! curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main; then
+            echo "⚠️ SukiSU setup.sh 执行失败，尝试手动克隆 drivers/kernelsu"
             rm -rf drivers/kernelsu
-            git clone --depth=1 --filter=blob:none --sparse \
-              https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/sukisu_repo
-            cd /tmp/sukisu_repo
-            git sparse-checkout set kernel
-            cd -
-            if [ -d /tmp/sukisu_repo/kernel/kernelsu ]; then
-              cp -r /tmp/sukisu_repo/kernel/kernelsu drivers/kernelsu
-            elif [ -d /tmp/sukisu_repo/kernel ]; then
-              cp -r /tmp/sukisu_repo/kernel drivers/kernelsu
-            fi
-            rm -rf /tmp/sukisu_repo
+            git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git drivers/kernelsu
           fi
 
           if [ ! -d drivers/kernelsu ]; then
             echo "❌ drivers/kernelsu 不存在，SukiSU 注入失败"
             exit 1
           fi
-          echo "✅ SukiSU 目录已就位: $(ls drivers/kernelsu/ | head -10)"
 
-          # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-          # Based on lss4/android_kernel_lenovo_paladin
-          # Target: Lenovo TB371FC / TB-Q706F / SM8250
-          # Compatible: ColorOS 15, HyperOS 3, Android 16
           if ! grep -q "EXPORT_SYMBOL_GPL(kallsyms_lookup_name)" kernel/kallsyms.c 2>/dev/null; then
-            echo 'EXPORT_SYMBOL_GPL(kallsyms_lookup_name);' >> kernel/kallsyms.c
-            echo "✅ Patched kernel/kallsyms.c"
+            echo "EXPORT_SYMBOL_GPL(kallsyms_lookup_name);" >> kernel/kallsyms.c
+            echo "✅ Patched kernel/kallsyms.c successfully"
           fi
 
-          if [ -f drivers/kernelsu/Kconfig ] && \
-             ! grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig; then
+          if ! grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig; then
             echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
             echo "✅ Patched drivers/Kconfig"
           fi
@@ -155,10 +91,6 @@ jobs:
           cd ..
           echo "=== SukiSU 注入完成 ==="
 
-      # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-      # Based on lss4/android_kernel_lenovo_paladin
-      # Target: Lenovo TB371FC / TB-Q706F / SM8250
-      # Compatible: ColorOS 15, HyperOS 3, Android 16
       - name: Backport compatible EROFS for Linux 4.19
         run: |
           cd kernel
@@ -166,57 +98,12 @@ jobs:
           rm -rf fs/erofs erofs_tmp
           mkdir -p include/linux
 
-          # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-          # Based on lss4/android_kernel_lenovo_paladin
-          # Target: Lenovo TB371FC / TB-Q706F / SM8250
-          # Compatible: ColorOS 15, HyperOS 3, Android 16
-          fs_ctx_ok=false
-          for mirror in \
-            "https://raw.githubusercontent.com/aosp-mirror/kernel_common/android-4.19-stable/include/linux/fs_context.h" \
-            "https://android.googlesource.com/kernel/common/+/refs/heads/android-4.19-stable/include/linux/fs_context.h?format=TEXT"; do
-            if curl -f -sL "$mirror" -o /tmp/fs_context_test 2>/dev/null && [ -s /tmp/fs_context_test ]; then
-              if file /tmp/fs_context_test | grep -q "ASCII\|UTF-8"; then
-                cp /tmp/fs_context_test include/linux/fs_context.h
-              else
-                base64 -d /tmp/fs_context_test > include/linux/fs_context.h
-              fi
-              fs_ctx_ok=true
-              echo "✅ fs_context.h 下载成功"
-              break
-            fi
-          done
+          curl -f -sL "https://raw.githubusercontent.com/aosp-mirror/kernel_common/android-4.19-stable/include/linux/fs_context.h" \
+            -o include/linux/fs_context.h || echo "⚠️ fs_context.h 下载跳过"
 
-          # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-          # Based on lss4/android_kernel_lenovo_paladin
-          # Target: Lenovo TB371FC / TB-Q706F / SM8250
-          # Compatible: ColorOS 15, HyperOS 3, Android 16
-          fs_parse_ok=false
-          for mirror in \
-            "https://raw.githubusercontent.com/aosp-mirror/kernel_common/android-4.19-stable/include/linux/fs_parser.h" \
-            "https://android.googlesource.com/kernel/common/+/refs/heads/android-4.19-stable/include/linux/fs_parser.h?format=TEXT"; do
-            if curl -f -sL "$mirror" -o /tmp/fs_parse_test 2>/dev/null && [ -s /tmp/fs_parse_test ]; then
-              if file /tmp/fs_parse_test | grep -q "ASCII\|UTF-8"; then
-                cp /tmp/fs_parse_test include/linux/fs_parser.h
-              else
-                base64 -d /tmp/fs_parse_test > include/linux/fs_parser.h
-              fi
-              fs_parse_ok=true
-              echo "✅ fs_parser.h 下载成功"
-              break
-            fi
-          done
+          curl -f -sL "https://raw.githubusercontent.com/aosp-mirror/kernel_common/android-4.19-stable/include/linux/fs_parser.h" \
+            -o include/linux/fs_parser.h || echo "⚠️ fs_parser.h 下载跳过"
 
-          if [ "$fs_ctx_ok" = false ] || [ "$fs_parse_ok" = false ]; then
-            echo "❌ 关键头文件下载失败，EROFS 无法编译"
-            echo "  fs_context.h: $fs_ctx_ok"
-            echo "  fs_parser.h:  $fs_parse_ok"
-            exit 1
-          fi
-
-          # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-          # Based on lss4/android_kernel_lenovo_paladin
-          # Target: Lenovo TB371FC / TB-Q706F / SM8250
-          # Compatible: ColorOS 15, HyperOS 3, Android 16
           git clone --depth=1 -b "${EROFS_BRANCH}" "${EROFS_REPO}" erofs_tmp
 
           if [ ! -d erofs_tmp/fs/erofs ]; then
@@ -242,103 +129,74 @@ jobs:
           cd ..
           echo "=== EROFS 4.19 适配移植完成 ==="
 
-      # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-      # Based on lss4/android_kernel_lenovo_paladin
-      # Target: Lenovo TB371FC / TB-Q706F / SM8250
-      # Compatible: ColorOS 15, HyperOS 3, Android 16
       - name: Generate TB371FC custom defconfig
         run: |
           cd kernel
-
           cp arch/arm64/configs/vendor/kona-perf_defconfig arch/arm64/configs/vendor/tb371fc_defconfig
 
-          tee -a arch/arm64/configs/vendor/tb371fc_defconfig > /dev/null << 'DEFCONFIG_EOF'
-          # ========== TB371FC 小新 Pad Pro 12.7 定制配置 ==========
-          # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-          # Based on lss4/android_kernel_lenovo_paladin
-          # Target: Lenovo TB371FC / TB-Q706F / SM8250
-          # Compatible: ColorOS 15, HyperOS 3, Android 16
-          #
-          # SukiSU / KernelSU
-          CONFIG_KSU=y
-          CONFIG_KPROBES=y
-          CONFIG_HAVE_KPROBES=y
-          CONFIG_KPROBE_EVENTS=y
-          CONFIG_KALLSYMS=y
-          CONFIG_KALLSYMS_ALL=y
-          #
-          # OverlayFS / root 相关
-          CONFIG_OVERLAY_FS=y
-          CONFIG_TMPFS_XATTR=y
-          #
-          # EROFS 文件系统配置 (4.19 backport)
-          CONFIG_EROFS_FS=y
-          CONFIG_EROFS_FS_XATTR=y
-          CONFIG_EROFS_FS_POSIX_ACL=y
-          CONFIG_EROFS_FS_SECURITY=y
-          CONFIG_EROFS_FS_ZIP=y
-          CONFIG_LIBCRC32C=y
-          CONFIG_LZ4_DECOMPRESS=y
-          CONFIG_CRYPTO_LZ4=y
-          #
-          # 常用文件系统
-          CONFIG_FUSE=y
-          CONFIG_EXFAT_FS=y
-          #
-          # 硬件驱动配置
-          CONFIG_SND_SOC_AS33970=y
-          CONFIG_SND_SOC_ES7210=y
-          CONFIG_SENSORS_SSC=y
-          CONFIG_SENSORS_HALL=y
-          CONFIG_TOUCHSCREEN_FTS=y
-          CONFIG_TOUCHSCREEN_GOODIX_BRL=y
-          CONFIG_TOUCHSCREEN_GOODIX_BRL_SPI=y
-          CONFIG_TOUCHSCREEN_GOODIX_BRL_GESTURE=y
-          CONFIG_GOODIX_FINGERPRINT=y
-          CONFIG_BACKLIGHT_QCOM_SPMI_WLED=y
-          CONFIG_BT_SLIM_QCA6390=y
-          CONFIG_CNSS2_QMI=y
-          CONFIG_BATTERY_BQ27XXX=y
-          CONFIG_BATTERY_BQ27XXX_I2C=y
-          CONFIG_SMB1398_CHARGER=y
-          #
-          # Android 16 / HyperOS / ColorOS 15 兼容配置
-          CONFIG_CGROUPS=y
-          CONFIG_CGROUP_FREEZER=y
-          CONFIG_CGROUP_CPUACCT=y
-          CONFIG_CGROUP_SCHED=y
-          CONFIG_CGROUP_BPF=y
-          CONFIG_BPF=y
-          CONFIG_BPF_SYSCALL=y
-          CONFIG_BPF_JIT=y
-          CONFIG_NAMESPACES=y
-          CONFIG_UTS_NS=y
-          CONFIG_IPC_NS=y
-          CONFIG_NET_NS=y
-          CONFIG_SECCOMP=y
-          CONFIG_SECCOMP_FILTER=y
-          CONFIG_ZRAM=y
-          CONFIG_ZSWAP=y
-          CONFIG_NET=y
-          CONFIG_INET=y
-          CONFIG_IPV6=y
-          CONFIG_PM_WAKELOCKS=y
-          CONFIG_POWER_SUPPLY=y
-          DEFCONFIG_EOF
+          DEFCONFIG=arch/arm64/configs/vendor/tb371fc_defconfig
 
-          sed -i 's/^[[:space:]]\+CONFIG_/CONFIG_/g' arch/arm64/configs/vendor/tb371fc_defconfig
-          sed -i 's/^[[:space:]]\+#/#/g' arch/arm64/configs/vendor/tb371fc_defconfig
-
-          echo "=== defconfig 尾部验证 ==="
-          tail -20 arch/arm64/configs/vendor/tb371fc_defconfig
+          printf '\n# TB371FC custom config\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_KSU=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_KPROBES=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_HAVE_KPROBES=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_KPROBE_EVENTS=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_KALLSYMS=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_KALLSYMS_ALL=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_OVERLAY_FS=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_TMPFS_XATTR=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_BUILD_IMAGE=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_EROFS_FS=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_EROFS_FS_XATTR=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_EROFS_FS_POSIX_ACL=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_EROFS_FS_SECURITY=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_EROFS_FS_ZIP=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_EROFS_FS_CLUSTER_PAGE_LIMIT=1\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_LIBCRC32C=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_LZ4_DECOMPRESS=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_FUSE=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_EXFAT_FS=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_SND_SOC_AS33970=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_SND_SOC_ES7210=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_SENSORS_SSC=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_SENSORS_HALL=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_TOUCHSCREEN_FTS=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_TOUCHSCREEN_GOODIX_BRL=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_TOUCHSCREEN_GOODIX_BRL_SPI=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_TOUCHSCREEN_GOODIX_BRL_GESTURE=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_GOODIX_FINGERPRINT=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_BACKLIGHT_QCOM_SPMI_WLED=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_BT_SLIM_QCA6390=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_CNSS2_QMI=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_BATTERY_BQ27XXX=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_BATTERY_BQ27XXX_I2C=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_SMB1398_CHARGER=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_CGROUPS=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_CGROUP_FREEZER=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_CGROUP_CPUACCT=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_CGROUP_SCHED=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_CGROUP_BPF=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_BPF=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_BPF_SYSCALL=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_BPF_JIT=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_BPF_JIT_ALWAYS_ON=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_NAMESPACES=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_UTS_NS=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_IPC_NS=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_NET_NS=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_SECCOMP=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_SECCOMP_FILTER=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_ZRAM=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_ZSWAP=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_NET=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_INET=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_IPV6=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_PM_WAKELOCKS=y\n' >> "${DEFCONFIG}"
+          printf 'CONFIG_POWER_SUPPLY=y\n' >> "${DEFCONFIG}"
 
           cd ..
           echo "=== TB371FC 自定义 defconfig 生成完毕 ==="
 
-      # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-      # Based on lss4/android_kernel_lenovo_paladin
-      # Target: Lenovo TB371FC / TB-Q706F / SM8250
-      # Compatible: ColorOS 15, HyperOS 3, Android 16
       - name: Build Kernel with Clang
         run: |
           cd kernel
@@ -356,36 +214,24 @@ jobs:
           echo "===== 开始生成内核配置 ====="
           make O="${OUT_DIR}" vendor/tb371fc_defconfig CC=clang LLVM=1 LLVM_IAS=1
 
-          echo "===== 验证关键配置项是否正确写入 ====="
-          for cfg in CONFIG_KSU CONFIG_EROFS_FS CONFIG_OVERLAY_FS CONFIG_KPROBES \
-                     CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL CONFIG_BPF CONFIG_BPF_SYSCALL \
-                     CONFIG_NAMESPACES CONFIG_LZ4_DECOMPRESS CONFIG_CRYPTO_LZ4; do
-            val=$(grep "^${cfg}=" "${OUT_DIR}/.config" 2>/dev/null || echo "NOT_FOUND")
-            echo "  $val"
-          done
+          echo "===== 检查关键配置 ====="
+          grep -E "CONFIG_KSU=|CONFIG_EROFS_FS=|CONFIG_OVERLAY_FS=|CONFIG_KPROBES=" "${OUT_DIR}/.config" || true
 
           echo "===== 编译内核主镜像 Image ====="
-          make -j"$(nproc)" O="${OUT_DIR}" Image CC=clang LLVM=1 LLVM_IAS=1 2>&1 | tail -50
+          make -j"$(nproc)" O="${OUT_DIR}" Image CC=clang LLVM=1 LLVM_IAS=1
 
           echo "===== 尝试编译 DTB ====="
-          make -j"$(nproc)" O="${OUT_DIR}" dtbs CC=clang LLVM=1 LLVM_IAS=1 2>&1 | tail -20 \
-            || echo "⚠️ DTB 编译失败或目标不存在，继续使用 Image 打包"
+          make -j"$(nproc)" O="${OUT_DIR}" dtbs CC=clang LLVM=1 LLVM_IAS=1 || echo "⚠️ DTB 编译失败或目标不存在，继续使用 Image 打包"
 
           echo "===== 尝试编译内核模块 ====="
-          make -j"$(nproc)" O="${OUT_DIR}" modules CC=clang LLVM=1 LLVM_IAS=1 2>&1 | tail -30 \
-            || echo "⚠️ modules 编译失败或无模块目标，继续打包 Image"
+          make -j"$(nproc)" O="${OUT_DIR}" modules CC=clang LLVM=1 LLVM_IAS=1 || echo "⚠️ modules 编译失败或无模块目标，继续打包 Image"
 
           mkdir -p "${OUT_DIR}/modules"
-          make O="${OUT_DIR}" modules_install INSTALL_MOD_PATH="${OUT_DIR}/modules" CC=clang LLVM=1 LLVM_IAS=1 \
-            || echo "⚠️ modules_install 跳过"
+          make O="${OUT_DIR}" modules_install INSTALL_MOD_PATH="${OUT_DIR}/modules" CC=clang LLVM=1 LLVM_IAS=1 || echo "⚠️ modules_install 跳过"
 
           cd ..
           echo "===== 内核编译流程全部执行完成 ====="
 
-      # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-      # Based on lss4/android_kernel_lenovo_paladin
-      # Target: Lenovo TB371FC / TB-Q706F / SM8250
-      # Compatible: ColorOS 15, HyperOS 3, Android 16
       - name: Check compiled kernel image
         run: |
           echo "=== Build output check ==="
@@ -405,10 +251,6 @@ jobs:
             echo "⚠️ No DTB files, use stock dtbo"
           fi
 
-      # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-      # Based on lss4/android_kernel_lenovo_paladin
-      # Target: Lenovo TB371FC / TB-Q706F / SM8250
-      # Compatible: ColorOS 15, HyperOS 3, Android 16
       - name: Package kernel with AnyKernel3
         run: |
           git clone --depth=1 "${ANYKERNEL_REPO}" anykernel
@@ -422,30 +264,14 @@ jobs:
 
           cd anykernel
 
-          if grep -q 'kernel.string=' anykernel.sh 2>/dev/null; then
-            sed -i 's|kernel.string=.*|kernel.string=TB371FC-SukiSU-EROFS|' anykernel.sh
-          else
-            echo "kernel.string=TB371FC-SukiSU-EROFS" >> anykernel.sh
-          fi
-
-          if grep -q 'do.devicecheck=' anykernel.sh 2>/dev/null; then
-            sed -i 's|do.devicecheck=1|do.devicecheck=0|' anykernel.sh
-          fi
-
-          if grep -q 'device.name1=' anykernel.sh 2>/dev/null; then
-            sed -i 's|device.name1=.*|device.name1=TB371FC|' anykernel.sh
-            sed -i 's|device.name2=.*|device.name2=TB-Q706F|' anykernel.sh
-          fi
+          sed -i 's|kernel.string=.*|kernel.string=TB371FC-SukiSU-EROFS|' anykernel.sh
+          sed -i 's|do.devicecheck=1|do.devicecheck=0|' anykernel.sh
 
           zip -r9 ../TB371FC_kernel.zip .
 
           cd ..
           echo "✅ 刷机包打包完成：$(ls -lh TB371FC_kernel.zip)"
 
-      # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
-      # Based on lss4/android_kernel_lenovo_paladin
-      # Target: Lenovo TB371FC / TB-Q706F / SM8250
-      # Compatible: ColorOS 15, HyperOS 3, Android 16
       - name: Upload kernel zip artifact
         uses: actions/upload-artifact@v4
         with:
