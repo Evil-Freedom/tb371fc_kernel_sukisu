@@ -4,6 +4,7 @@
 
 name: Build TB371FC Kernel
 on: workflow_dispatch
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -24,98 +25,66 @@ jobs:
           build-essential bc kmod cpio flex libncurses5-dev \
           libelf-dev libssl-dev dwarves bison python3 \
           python-is-python3 git curl wget zip unzip \
-          gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+          clang lld llvm
 
     - name: Clone kernel source
       run: |
+        rm -rf kernel out anykernel TB371FC_kernel.zip
         git clone --depth=1 -b 11 \
           https://github.com/lss4/android_kernel_lenovo_paladin.git kernel
-        echo "Kernel cloned. Files:"
         ls kernel/
-        echo "Defconfigs:"
         ls kernel/arch/arm64/configs/vendor/
 
     - name: Setup SukiSU-Ultra
       run: |
         cd kernel
-        echo "=== Integrating SukiSU-Ultra ==="
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main || {
-          echo "Setup script failed, cloning manually..."
           git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git drivers/kernelsu
         }
 
-        # Patch for non-GKI 4.19
-        echo "Patching for non-GKI 4.19..."
-
-        # Export kallsyms_lookup_name
+        # 修正：内核源码目录下的 kernel/kallsyms.c 正确路径
         if ! grep -q "EXPORT_SYMBOL_GPL(kallsyms_lookup_name)" kernel/kallsyms.c 2>/dev/null; then
           echo "EXPORT_SYMBOL_GPL(kallsyms_lookup_name);" >> kernel/kallsyms.c
-          echo "Patched kallsyms.c"
+          echo "Patched kernel/kallsyms.c"
         fi
 
-        # Add Kconfig
         if ! grep -q "kernelsu/Kconfig" drivers/Kconfig 2>/dev/null; then
           echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-          echo "Patched drivers/Kconfig"
         fi
 
-        # Add Makefile
         if ! grep -q "kernelsu" drivers/Makefile 2>/dev/null; then
           echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-          echo "Patched drivers/Makefile"
         fi
-
-        echo "=== SukiSU integration complete ==="
+        cd ..
 
     - name: Backport EROFS filesystem
       run: |
         cd kernel
-        echo "=== EROFS backport for 4.19 ==="
-
         mkdir -p fs/erofs
-
-        # Download EROFS source files
         EROFS_FILES="Kconfig Makefile compress.h data.c decompressor.c dir.c \
                      erofs_fs.h inode.c internal.h namei.c super.c tagptr.h \
                      utils.c xattr.c xattr.h zdata.c zdata.h zmap.c zpvec.h"
-
         for f in $EROFS_FILES; do
-          echo "  Downloading fs/erofs/$f..."
-          curl -sL "https://raw.githubusercontent.com/lateautumn233/erofs_kernel_4_19/linux-4.19.y/fs/erofs/$f" -o "fs/erofs/$f"
+          curl -f -sL "https://raw.githubusercontent.com/lateautumn233/erofs_kernel_4_19/linux-4.19.y/fs/erofs/$f" -o "fs/erofs/$f" || echo "Skip missing file: $f"
         done
 
-        echo "EROFS files: $(ls fs/erofs/ | wc -l)"
-
-        # Patch fs/Makefile
         if ! grep -q 'erofs' fs/Makefile; then
           echo 'obj-$(CONFIG_EROFS_FS) += erofs/' >> fs/Makefile
-          echo "Patched fs/Makefile"
         fi
-
-        # Patch fs/Kconfig
         if ! grep -q 'erofs/Kconfig' fs/Kconfig; then
           sed -i '/source "fs\/fuse\/Kconfig"/a source "fs\/erofs\/Kconfig"' fs/Kconfig
-          echo "Patched fs/Kconfig"
         fi
-
-        echo "=== EROFS backport complete ==="
+        cd ..
 
     - name: Create TB371FC defconfig
       run: |
         cd kernel
-
-        # Start from kona-perf_defconfig (TB-Q706F base)
         cp arch/arm64/configs/vendor/kona-perf_defconfig \
            arch/arm64/configs/vendor/tb371fc_defconfig
 
-        # Add TB371FC-specific configs
         cat >> arch/arm64/configs/vendor/tb371fc_defconfig << 'EOF'
-
         # ========== TB371FC (小新Pad Pro 12.7) 补充配置 ==========
-        # 基于 kona-perf_defconfig (TB-Q706F)
-        # 兼容: ColorOS 15, HyperOS 3, Android 16
-
-        # === SukiSU-Ultra ===
         CONFIG_KPROBES=y
         CONFIG_HAVE_KPROBES=y
         CONFIG_KPROBE_EVENTS=y
@@ -123,8 +92,8 @@ jobs:
         CONFIG_TMPFS_XATTR=y
         CONFIG_KALLSYMS=y
         CONFIG_KALLSYMS_ALL=y
+        CONFIG_BUILD_IMAGE=y
 
-        # === EROFS 文件系统 (backport from lateautumn233) ===
         CONFIG_EROFS_FS=y
         CONFIG_EROFS_FS_XATTR=y
         CONFIG_EROFS_FS_POSIX_ACL=y
@@ -134,36 +103,21 @@ jobs:
         CONFIG_LIBCRC32C=y
         CONFIG_LZ4_DECOMPRESS=y
 
-        # === TB371FC 音频 (使用 paladin 已有的 codec) ===
         CONFIG_SND_SOC_AS33970=y
         CONFIG_SND_SOC_ES7210=y
-        # 注意: WCD938x 和 WSA881x 驱动不在 paladin 源码中
-        # 如需支持, 需要从其他 Qualcomm BSP 内核移植驱动源码
-
-        # === TB371FC 传感器 ===
         CONFIG_SENSORS_SSC=y
         CONFIG_SENSORS_HALL=y
-
-        # === TB371FC 触摸屏 ===
         CONFIG_TOUCHSCREEN_FTS=y
         CONFIG_TOUCHSCREEN_GOODIX_BRL=y
         CONFIG_TOUCHSCREEN_GOODIX_BRL_SPI=y
         CONFIG_TOUCHSCREEN_GOODIX_BRL_GESTURE=y
         CONFIG_GOODIX_FINGERPRINT=y
-
-        # === TB371FC 背光 ===
         CONFIG_BACKLIGHT_QCOM_SPMI_WLED=y
-
-        # === TB371FC WiFi/Bluetooth ===
         CONFIG_BT_SLIM_QCA6390=y
         CONFIG_CNSS2_QMI=y
-
-        # === TB371FC 电池/充电 ===
         CONFIG_BATTERY_BQ27XXX=y
         CONFIG_BATTERY_BQ27XXX_I2C=y
         CONFIG_SMB1398_CHARGER=y
-
-        # === Android 16 / ColorOS 15 / HyperOS 3 兼容 ===
         CONFIG_FUSE=y
         CONFIG_CGROUPS=y
         CONFIG_CGROUP_FREEZER=y
@@ -188,89 +142,57 @@ jobs:
         CONFIG_POWER_SUPPLY=y
         CONFIG_EXFAT_FS=y
         EOF
-
-        echo "=== TB371FC defconfig created ==="
-        echo "Total lines: $(wc -l < arch/arm64/configs/vendor/tb371fc_defconfig)"
-        echo ""
-        echo "Key configs:"
-        grep -E 'CONFIG_KPROBES|CONFIG_EROFS|CONFIG_SND_SOC|CONFIG_TOUCHSCREEN|CONFIG_SENSORS_SSC|CONFIG_BACKLIGHT|CONFIG_BPF' arch/arm64/configs/vendor/tb371fc_defconfig | head -20
+        cd ..
 
     - name: Build kernel
       run: |
         cd kernel
-        echo "=== Building kernel ==="
-        echo "Defconfig: vendor/tb371fc_defconfig"
-        echo "Arch: arm64"
-        echo "Compiler: clang + aarch64-linux-gnu-"
-        echo ""
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CLANG_TRIPLE=aarch64-linux-gnu-
+        mkdir -p ../out
 
-        # Generate .config
-        make -j$(nproc) ARCH=arm64 \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          CC=clang \
-          vendor/tb371fc_defconfig O=../out 2>&1 | tail -5
+        set -e -o pipefail
 
-        echo ""
-        echo "=== Compiling kernel ==="
+        # 1. 生成配置
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang CLANG_TRIPLE=aarch64-linux-gnu- vendor/tb371fc_defconfig O=../out
 
-        # Build kernel
-        make -j$(nproc) ARCH=arm64 \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          CC=clang \
-          O=../out 2>&1 | tail -20
+        # 2. 编译内核 Image
+        make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang CLANG_TRIPLE=aarch64-linux-gnu- Image O=../out
 
-        echo ""
-        echo "=== Compiling modules ==="
-
-        # Build modules
-        make -j$(nproc) ARCH=arm64 \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          CC=clang \
-          modules O=../out 2>&1 | tail -10
-
-        # Install modules
-        make -j$(nproc) ARCH=arm64 \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          CC=clang \
-          modules_install INSTALL_MOD_PATH=../out/modules O=../out 2>&1 | tail -5
+        # 3. 编译模块
+        make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang CLANG_TRIPLE=aarch64-linux-gnu- modules O=../out
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang CLANG_TRIPLE=aarch64-linux-gnu- modules_install INSTALL_MOD_PATH=../out/modules O=../out
+        cd ..
 
     - name: Check build output
       run: |
         echo "=== Build output check ==="
+        ls -la out/arch/arm64/boot/
         if [ -f out/arch/arm64/boot/Image ]; then
           echo "✅ Kernel Image: $(ls -lh out/arch/arm64/boot/Image)"
         else
           echo "❌ Kernel Image not found!"
-          echo "Checking for errors in build log..."
           exit 1
         fi
-
-        # Check for DTB
-        ls out/arch/arm64/boot/dts/vendor/qcom/*.dtb 2>/dev/null && echo "✅ DTB found" || echo "⚠️ No DTB (using stock dtbo.img)"
+        ls out/arch/arm64/boot/dts/vendor/qcom/*.dtb 2>/dev/null && echo "✅ DTB found" || echo "⚠️ No DTB"
 
     - name: Package with AnyKernel3
       run: |
         git clone https://github.com/osm0sis/AnyKernel3.git anykernel
-
-        # Copy kernel image
         cp out/arch/arm64/boot/Image anykernel/
-
-        # Copy DTB if available
         cp out/arch/arm64/boot/dts/vendor/qcom/kona*.dtb anykernel/ 2>/dev/null || true
-
-        # Copy modules
-        find out/modules -name "*.ko" -exec cp {} anykernel/ \; 2>/dev/null || true
-
-        # Configure AnyKernel3
+        
+        # 确保 anykernel/modules 目录存在
+        mkdir -p anykernel/modules
+        find out/modules -name "*.ko" -exec cp {} anykernel/modules/ \; 2>/dev/null || true
+        
         cd anykernel
         sed -i 's|kernel.string=.*|kernel.string=TB371FC-SukiSU|' anykernel.sh
         sed -i 's|do.devicecheck=1|do.devicecheck=0|' anykernel.sh
-
-        # Package
         zip -r9 ../TB371FC_kernel.zip .
-        echo ""
-        echo "=== Package complete ==="
-        ls -lh ../TB371FC_kernel.zip
+        cd ..
+        ls -lh TB371FC_kernel.zip
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
