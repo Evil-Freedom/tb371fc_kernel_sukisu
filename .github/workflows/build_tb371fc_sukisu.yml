@@ -1,23 +1,48 @@
 # TB371FC Kernel Build with SukiSU-Ultra + EROFS + Android 16 Support
 # Based on lss4/android_kernel_lenovo_paladin
-# Target: Lenovo TB371FC / TB-Q706F / SM8250
+# Target: Lenovo TB371FC / TB-Q706F / SM8250 (Snapdragon 870)
 # Compatible: ColorOS 15, HyperOS 3, Android 16
+#
+# 优化说明 (vs 旧版):
+#   1. 仓库内的 tb371fc_defconfig 现在作为唯一配置源 (旧版每次用 kona-perf + 内联块覆盖,
+#      导致提交的 defconfig 是"死代码")。
+#   2. 固定 clang-14 工具链版本, 构建更稳定可复现。
+#   3. 引入 ccache + GitHub Actions 缓存, 重复构建显著加速。
+#   4. 增加 concurrency 防止重复运行互相覆盖。
+#   5. 构建成功后自动创建 GitHub Release (打标签 + 变更说明), 实现"发布"。
 name: Build TB371FC Kernel
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: '构建完成后发布 GitHub Release'
+        required: false
+        default: 'true'
+        type: boolean
+  push:
+    branches: [main]
+    paths:
+      - 'arch/arm64/configs/vendor/tb371fc_defconfig'
+      - '.github/workflows/build_tb371fc_sukisu.yml'
+
+concurrency:
+  group: tb371fc-kernel-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KERNEL_REPO: https://github.com/lss4/android_kernel_lenovo_paladin.git
+  KERNEL_BRANCH: "11"
+  EROFS_REPO: https://github.com/lateautumn233/erofs_kernel_4_19.git
+  EROFS_BRANCH: linux-4.19.y
+  ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3.git
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CLANG_VERSION: "14"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
-
-    env:
-      KERNEL_REPO: https://github.com/lss4/android_kernel_lenovo_paladin.git
-      KERNEL_BRANCH: "11"
-      EROFS_REPO: https://github.com/lateautumn233/erofs_kernel_4_19.git
-      EROFS_BRANCH: linux-4.19.y
-      ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3.git
+    timeout-minutes: 240
 
     steps:
       - name: Checkout workflow repository
@@ -29,15 +54,23 @@ jobs:
           sudo apt-get clean
           df -h
 
-      - name: Install basic dependencies
+      - name: Install dependencies (pinned clang-${{ env.CLANG_VERSION }})
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential bc kmod cpio flex libncurses5-dev \
             libelf-dev libssl-dev dwarves bison python3 \
-            python-is-python3 git curl wget zip unzip \
-            clang lld llvm \
+            python-is-python3 git curl wget zip unzip ccache \
+            clang-${{ env.CLANG_VERSION }} clang lld-${{ env.CLANG_VERSION }} lld llvm \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: tb371fc-kernel-ccache-${{ github.run_id }}
+          restore-keys: |
+            tb371fc-kernel-ccache-
 
       - name: Clean old build artifacts
         run: |
@@ -48,12 +81,20 @@ jobs:
       - name: Clone kernel source
         run: |
           git clone --depth=1 -b "${KERNEL_BRANCH}" "${KERNEL_REPO}" kernel
-          if [ ! -f kernel/arch/arm64/configs/vendor/kona-perf_defconfig ]; then
-            echo "❌ 找不到 vendor/kona-perf_defconfig"
+          ls kernel/arch/arm64/configs/vendor/ | head
+          echo "=== 内核源码拉取完毕 ==="
+
+      - name: Use repository tb371fc_defconfig as single source of truth
+        run: |
+          SRC="$GITHUB_WORKSPACE/arch/arm64/configs/vendor/tb371fc_defconfig"
+          DST="kernel/arch/arm64/configs/vendor/tb371fc_defconfig"
+          if [ ! -f "$SRC" ]; then
+            echo "❌ 仓库内找不到 tb371fc_defconfig"
             exit 1
           fi
-          ls kernel/arch/arm64/configs/vendor/
-          echo "=== 内核源码拉取完毕 ==="
+          cp "$SRC" "$DST"
+          echo "✅ 已使用仓库提交的 defconfig 作为唯一配置源"
+          grep -c '^CONFIG_' "$DST" | xargs echo "defconfig 配置项数量:"
 
       - name: Setup SukiSU-Ultra
         run: |
@@ -140,21 +181,21 @@ jobs:
           fi
           if [ "$fs_ctx_ok" = false ]; then
             cat > include/linux/fs_context.h << 'STUB_EOF'
-#ifndef _LINUX_FS_CONTEXT_H
-#define _LINUX_FS_CONTEXT_H
-#include <linux/parser.h>
-#include <linux/security.h>
-struct fs_context;
-#endif
-STUB_EOF
+          #ifndef _LINUX_FS_CONTEXT_H
+          #define _LINUX_FS_CONTEXT_H
+          #include <linux/parser.h>
+          #include <linux/security.h>
+          struct fs_context;
+          #endif
+          STUB_EOF
           fi
           if [ "$fs_parse_ok" = false ]; then
             cat > include/linux/fs_parser.h << 'STUB_EOF'
-#ifndef _LINUX_FS_PARSER_H
-#define _LINUX_FS_PARSER_H
-#include <linux/parser.h>
-#endif
-STUB_EOF
+          #ifndef _LINUX_FS_PARSER_H
+          #define _LINUX_FS_PARSER_H
+          #include <linux/parser.h>
+          #endif
+          STUB_EOF
           fi
           cp -r erofs_tmp/fs/erofs fs/
           rm -rf erofs_tmp
@@ -171,93 +212,34 @@ STUB_EOF
           cd ..
           echo "=== EROFS 4.19 适配移植完成 ==="
 
-      - name: Generate TB371FC custom defconfig
-        run: |
-          cd kernel
-          cp arch/arm64/configs/vendor/kona-perf_defconfig arch/arm64/configs/vendor/tb371fc_defconfig
-          tee -a arch/arm64/configs/vendor/tb371fc_defconfig > /dev/null << 'DEFCONFIG_EOF'
-CONFIG_KSU=y
-CONFIG_KPROBES=y
-CONFIG_HAVE_KPROBES=y
-CONFIG_KPROBE_EVENTS=y
-CONFIG_KALLSYMS=y
-CONFIG_KALLSYMS_ALL=y
-CONFIG_OVERLAY_FS=y
-CONFIG_TMPFS_XATTR=y
-CONFIG_EROFS_FS=y
-CONFIG_EROFS_FS_XATTR=y
-CONFIG_EROFS_FS_POSIX_ACL=y
-CONFIG_EROFS_FS_SECURITY=y
-CONFIG_EROFS_FS_ZIP=y
-CONFIG_LIBCRC32C=y
-CONFIG_LZ4_DECOMPRESS=y
-CONFIG_CRYPTO_LZ4=y
-CONFIG_FUSE=y
-CONFIG_EXFAT_FS=y
-CONFIG_SND_SOC_AS33970=y
-CONFIG_SND_SOC_ES7210=y
-CONFIG_SENSORS_SSC=y
-CONFIG_SENSORS_HALL=y
-CONFIG_TOUCHSCREEN_FTS=y
-CONFIG_TOUCHSCREEN_GOODIX_BRL=y
-CONFIG_TOUCHSCREEN_GOODIX_BRL_SPI=y
-CONFIG_TOUCHSCREEN_GOODIX_BRL_GESTURE=y
-CONFIG_GOODIX_FINGERPRINT=y
-CONFIG_BACKLIGHT_QCOM_SPMI_WLED=y
-CONFIG_BT_SLIM_QCA6390=y
-CONFIG_CNSS2_QMI=y
-CONFIG_BATTERY_BQ27XXX=y
-CONFIG_BATTERY_BQ27XXX_I2C=y
-CONFIG_SMB1398_CHARGER=y
-CONFIG_CGROUPS=y
-CONFIG_CGROUP_FREEZER=y
-CONFIG_CGROUP_CPUACCT=y
-CONFIG_CGROUP_SCHED=y
-CONFIG_CGROUP_BPF=y
-CONFIG_BPF=y
-CONFIG_BPF_SYSCALL=y
-CONFIG_BPF_JIT=y
-CONFIG_NAMESPACES=y
-CONFIG_UTS_NS=y
-CONFIG_IPC_NS=y
-CONFIG_NET_NS=y
-CONFIG_SECCOMP=y
-CONFIG_SECCOMP_FILTER=y
-CONFIG_ZRAM=y
-CONFIG_ZSWAP=y
-CONFIG_NET=y
-CONFIG_INET=y
-CONFIG_IPV6=y
-CONFIG_PM_WAKELOCKS=y
-CONFIG_POWER_SUPPLY=y
-DEFCONFIG_EOF
-          sed -i 's/^[[:space:]]\+CONFIG_/CONFIG_/g' arch/arm64/configs/vendor/tb371fc_defconfig
-          echo "=== defconfig 生成完毕 ==="
-          cd ..
-
-      - name: Build Kernel with Clang
+      - name: Build Kernel with Clang (ccache enabled)
         run: |
           cd kernel
           export ARCH=arm64
           export SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CC="ccache clang-${{ env.CLANG_VERSION }}"
+          export HOSTCC="ccache clang-${{ env.CLANG_VERSION }}"
+          export HOSTCXX="ccache clang++-${{ env.CLANG_VERSION }}"
+          export CCACHE_NOHASHDIR=1
+          export CCACHE_BASEDIR="$(pwd)"
           OUT_DIR="../out"
           set -e
           set -o pipefail
 
           # 使用 LLVM_IAS=0 禁用 Clang 内置汇编器，改用 GNU as
-          make O="${OUT_DIR}" vendor/tb371fc_defconfig CC=clang LLVM=1 LLVM_IAS=0
+          make O="${OUT_DIR}" vendor/tb371fc_defconfig CC="${CC}" LLVM=1 LLVM_IAS=0
 
-          for cfg in CONFIG_KSU CONFIG_EROFS_FS CONFIG_OVERLAY_FS CONFIG_KPROBES; do
+          for cfg in CONFIG_KSU CONFIG_EROFS_FS CONFIG_OVERLAY_FS CONFIG_KPROBES CONFIG_PID_NS; do
             grep "^${cfg}=" "${OUT_DIR}/.config" || echo "  ${cfg}=NOT_FOUND"
           done
 
-          make -j"$(nproc)" O="${OUT_DIR}" Image CC=clang LLVM=1 LLVM_IAS=0
-          make -j"$(nproc)" O="${OUT_DIR}" dtbs CC=clang LLVM=1 LLVM_IAS=0 || echo "⚠️ DTB 编译跳过"
-          make -j"$(nproc)" O="${OUT_DIR}" modules CC=clang LLVM=1 LLVM_IAS=0 || echo "⚠️ modules 编译跳过"
+          make -j"$(nproc)" O="${OUT_DIR}" Image CC="${CC}" LLVM=1 LLVM_IAS=0
+          make -j"$(nproc)" O="${OUT_DIR}" dtbs CC="${CC}" LLVM=1 LLVM_IAS=0 || echo "⚠️ DTB 编译跳过"
+          make -j"$(nproc)" O="${OUT_DIR}" modules CC="${CC}" LLVM=1 LLVM_IAS=0 || echo "⚠️ modules 编译跳过"
           mkdir -p "${OUT_DIR}/modules"
-          make O="${OUT_DIR}" modules_install INSTALL_MOD_PATH="${OUT_DIR}/modules" CC=clang LLVM=1 LLVM_IAS=0 || true
+          make O="${OUT_DIR}" modules_install INSTALL_MOD_PATH="${OUT_DIR}/modules" CC="${CC}" LLVM=1 LLVM_IAS=0 || true
           cd ..
           echo "===== 内核编译完成 ====="
 
@@ -270,6 +252,12 @@ DEFCONFIG_EOF
             exit 1
           fi
           ls out/arch/arm64/boot/dts/vendor/qcom/kona*.dtb 2>/dev/null && echo "✅ DTB exists" || echo "⚠️ No DTB"
+          # 记录内核版本供 Release 使用
+          if [ -f out/include/config/kernel.release ]; then
+            echo "KERNEL_VER=$(cat out/include/config/kernel.release)" >> "$GITHUB_ENV"
+          else
+            echo "KERNEL_VER=unknown" >> "$GITHUB_ENV"
+          fi
 
       - name: Package kernel with AnyKernel3
         run: |
@@ -295,3 +283,32 @@ DEFCONFIG_EOF
           name: TB371FC_SukiSU_EROFS_Kernel
           path: TB371FC_kernel.zip
           retention-days: 90
+
+      - name: Publish GitHub Release
+        if: ${{ github.event.inputs.publish_release != 'false' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: tb371fc-${{ github.run_id }}
+          name: "TB371FC Kernel ${{ env.KERNEL_VER }} (build ${{ github.run_id }})"
+          files: TB371FC_kernel.zip
+          body: |
+            ## TB371FC 安卓内核构建 (SukiSU-Ultra + EROFS)
+
+            - **内核版本**: `${{ env.KERNEL_VER }}`
+            - **设备**: 联想小新 Pad Pro 12.7 (TB371FC) / SM8250 骁龙 870
+            - **集成**: SukiSU-Ultra (KernelSU Root + KPM)、EROFS (LZ4)、Android 16 兼容
+            - **编译**: Clang ${{ env.CLANG_VERSION }} + ccache
+
+            ### 本次优化要点
+            - 仓库 `tb371fc_defconfig` 现为唯一配置源 (修复旧版被覆盖的死代码问题)
+            - 关闭发布版调试选项 (DEBUG_INFO / CORESIGHT / IOMMU_DEBUG / DEBUG_LIST / IPA_UT)
+            - 启用 `CONFIG_PID_NS` 与 schedutil 默认调频
+            - 去除 defconfig 重复符号, 补全 `CONFIG_KSU` / `CONFIG_CRYPTO_LZ4`
+
+            刷入方式: TWRP / 自定义 Recovery 卡刷 `TB371FC_kernel.zip`。
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: ccache stats
+        if: always()
+        run: ccache -s || true
