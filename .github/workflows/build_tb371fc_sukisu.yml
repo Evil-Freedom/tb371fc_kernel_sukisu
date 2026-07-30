@@ -25,6 +25,9 @@ on:
     paths:
       - 'arch/arm64/configs/vendor/tb371fc_defconfig'
       - '.github/workflows/build_tb371fc_sukisu.yml'
+      - 'vendor_drivers/**'
+      - 'patches/**'
+      - 'port/**'
 
 concurrency:
   group: tb371fc-kernel-${{ github.ref }}
@@ -94,6 +97,9 @@ jobs:
           fi
           cp "$SRC" "$DST"
           echo "✅ 已使用仓库提交的 defconfig 作为唯一配置源"
+          # [FIX] 确保 CONFIG_KSU=y 存在，不再依赖 SukiSU setup.sh 的副作用
+          # (旧版仅靠 setup.sh 追加，仓库 defconfig 是死代码，setup 版本变动即静默不编 Root)
+          grep -q '^CONFIG_KSU=y' "$DST" || echo 'CONFIG_KSU=y' >> "$DST"
           grep -c '^CONFIG_' "$DST" | xargs echo "defconfig 配置项数量:"
 
       - name: Setup SukiSU-Ultra
@@ -143,6 +149,12 @@ jobs:
         run: |
           cd kernel
           rm -rf fs/erofs erofs_tmp
+          # [FIX] 移除 paladin 内置 drivers/staging/erofs：其 Kconfig 同样定义 EROFS_FS 符号，
+          # 与下方克隆的新版 fs/erofs 冲突，会导致 Kconfig "symbol redefined" 及链接期
+          # multiple definition of erofs_fs_type，构建 100% 失败。
+          rm -rf drivers/staging/erofs
+          sed -i '/obj-\$(CONFIG_EROFS_FS).*+= erofs\//d' drivers/staging/Makefile 2>/dev/null || true
+          sed -i '/source "drivers\/staging\/erofs\/Kconfig"/d' drivers/staging/Kconfig 2>/dev/null || true
           mkdir -p include/linux
           git clone --depth=1 -b "${EROFS_BRANCH}" "${EROFS_REPO}" erofs_tmp
           if [ ! -d erofs_tmp/fs/erofs ]; then
@@ -212,6 +224,36 @@ jobs:
           cd ..
           echo "=== EROFS 4.19 适配移植完成 ==="
 
+      - name: Import TB371FC vendor drivers (ktz8866 backlight + touch compatible + DTS)
+        run: |
+          cd kernel
+          # 1) ktz8866 背光驱动 (paladin 缺失, 从 PocoF3 SM8250 4.19.325 内核提取, API 兼容)
+          cp "$GITHUB_WORKSPACE/vendor_drivers/drivers/video/backlight/ktz8866.c" drivers/video/backlight/ktz8866.c
+          mkdir -p include/linux/platform_data
+          cp "$GITHUB_WORKSPACE/vendor_drivers/include/linux/platform_data/ktz8866.h" include/linux/platform_data/ktz8866.h
+          if ! grep -q 'ktz8866.o' drivers/video/backlight/Makefile; then
+            printf 'obj-$(CONFIG_BACKLIGHT_KTZ8866)\t\t+= ktz8866.o\n' >> drivers/video/backlight/Makefile
+          fi
+          if ! grep -q 'BACKLIGHT_KTZ8866' drivers/video/backlight/Kconfig; then
+            cat >> drivers/video/backlight/Kconfig << 'KTZ_EOF'
+
+          config BACKLIGHT_KTZ8866
+          	tristate "KTZ8866 Backlight"
+          	depends on I2C
+          	help
+          	  If you have a KTZ8866 say Y to enable the backlight driver.
+          KTZ_EOF
+          fi
+          # 2) 触摸 nt36xxx: 让驱动匹配固件 DTS 的 "novatek,NVT-ts-spi" (原驱动只认 "novatek,NVT-ts")
+          if [ -f "$GITHUB_WORKSPACE/patches/nt36xxx_compatible.patch" ]; then
+            git apply --ignore-whitespace "$GITHUB_WORKSPACE/patches/nt36xxx_compatible.patch" 2>/dev/null || \
+            patch -p1 < "$GITHUB_WORKSPACE/patches/nt36xxx_compatible.patch" 2>/dev/null || \
+            echo "⚠️ nt36xxx 兼容补丁未应用(可能已合入)"
+          fi
+          # 3) 设备树:沿用原厂 dtbo,不注入自定义 dtsi(如需自带 dtb 见本地 port/tb371fc.dtsi)
+          cd ..
+          echo "=== TB371FC vendor 驱动导入完成 ==="
+
       - name: Build Kernel with Clang (ccache enabled)
         run: |
           cd kernel
@@ -263,7 +305,11 @@ jobs:
         run: |
           git clone --depth=1 "${ANYKERNEL_REPO}" anykernel
           cp out/arch/arm64/boot/Image anykernel/
-          cp out/arch/arm64/boot/dts/vendor/qcom/kona*.dtb anykernel/ 2>/dev/null || true
+          # ---- 设备树 --------------------------------------------------------
+          # 沿用设备原有 boot.img 的 dtb 段（原厂 dtb/dtbo），不注入自定义 DTB。
+          # paladin 树无 kona board dts，内核不自产 DTB；驱动侧已通过 compatible
+          # 补丁 (nt36xxx / ktz8866) 匹配原厂 dtbo 节点，由 ABL 叠加 dtbo#07 点亮硬件。
+          echo "ℹ️ 沿用原厂 dtb/dtbo（不注入自定义 DTB）"
           mkdir -p anykernel/modules
           find out/modules -name "*.ko" -exec cp {} anykernel/modules/ \; 2>/dev/null || true
           cd anykernel
@@ -304,6 +350,13 @@ jobs:
             - 关闭发布版调试选项 (DEBUG_INFO / CORESIGHT / IOMMU_DEBUG / DEBUG_LIST / IPA_UT)
             - 启用 `CONFIG_PID_NS` 与 schedutil 默认调频
             - 去除 defconfig 重复符号, 补全 `CONFIG_KSU` / `CONFIG_CRYPTO_LZ4`
+            - 移除 `drivers/staging/erofs`, 消除与 `fs/erofs` 的符号冲突
+            - 移植 KTZ8866 双背光驱动, 修正 nt36xxx 触摸 `compatible` 匹配
+
+            ### 设备树
+            本版本 **沿用设备原厂 dtb/dtbo**（paladin 树无 kona board dts，内核不自产 DTB）。
+            内核侧已通过 compatible 补丁 (nt36xxx 触摸 / ktz8866 双背光) 与原厂 `dtbo.img#07`
+            (TB371FC/spinel) 节点匹配，刷机后由 ABL 叠加原厂 dtbo 正常点亮硬件。
 
             刷入方式: TWRP / 自定义 Recovery 卡刷 `TB371FC_kernel.zip`。
         env:
