@@ -1,0 +1,8 @@
+--- a/drivers/input/touchscreen/nt36xxx/nt36xxx.c
++++ b/drivers/input/touchscreen/nt36xxx/nt36xxx.c
+@@ -1930,6 +1930,7 @@
+ static struct of_device_id nvt_match_table[] = {
+ 	{ .compatible = "novatek,NVT-ts",},
++	{ .compatible = "novatek,NVT-ts-spi",},
+ 	{ },
+ };
