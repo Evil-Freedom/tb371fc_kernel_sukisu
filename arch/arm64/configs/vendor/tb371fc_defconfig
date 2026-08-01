@@ -744,10 +744,15 @@ CONFIG_CORESIGHT_DUMMY=y
 CONFIG_CORESIGHT_REMOTE_ETM=y
 CONFIG_CORESIGHT_TGU=y
 CONFIG_I2C_HID=y
-#SYNA AS33970
-CONFIG_SND_SOC_AS33970=y
-#ES7210
-CONFIG_SND_SOC_ES7210=y
+# === TB371FC 音频状态（已核实 2026-08-01）===
+# 真机扬声器 = 4x TFA98xx（base dtb tfa98xx@34..37，compatible "tfa,tfa98xx"）。
+# 但 paladin 内核（lss4/android_kernel_lenovo_paladin, branch 11）的
+# sound/soc/codecs/ 仅含 TFA9879 驱动，[b]不含 TFA98XX 驱动[/b]，
+# 也不存在 CONFIG_SND_SOC_TFA98XX 符号 —— 扬声器目前无驱动、无声。
+# 因此本文件[互不]添加该（不存在的）配置符号[/互不]，避免产生误导性的死配置。
+# 修复路径（独立后续任务）：像 KTZ8866 那样 vendor 一份 4.19 兼容的 tfa98xx
+#   驱动 + Lenovo 专用固件（.tfa98xx coef/patch），再补 Kconfig/Makefile 与
+#   machine driver 的 dai-link。AS33970 / ES7210 属于其他机型，本机不需要。
 CONFIG_TOUCHSCREEN_GOODIX_CHIPSET=y
 CONFIG_TOUCHSCREEN_GOODIX_BRL=y
 CONFIG_GOODIX_BRL_TOOLS=y
@@ -783,9 +788,8 @@ CONFIG_EROFS_FS_CLUSTER_PAGE_LIMIT=1
 CONFIG_LIBCRC32C=y
 CONFIG_LZ4_DECOMPRESS=y
 
-# === TB371FC 音频 (paladin 已有的 codec) ===
-CONFIG_SND_SOC_AS33970=y
-CONFIG_SND_SOC_ES7210=y
+# === TB371FC 音频 === 见上方 "音频状态（已核实）" 块：paladin 内核缺失 tfa98xx 驱动，
+#   扬声器无声，需 vendor 驱动+固件后才能启用；本机不需要 AS33970/ES7210。
 
 # === TB371FC 传感器 ===
 CONFIG_SENSORS_SSC=y
