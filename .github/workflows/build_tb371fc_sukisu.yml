@@ -3,13 +3,24 @@
 # Target: Lenovo TB371FC / TB-Q706F / SM8250 (Snapdragon 870)
 # Compatible: ColorOS 15, HyperOS 3, Android 16
 #
-# 优化说明 (vs 旧版):
-#   1. 仓库内的 tb371fc_defconfig 现在作为唯一配置源 (旧版每次用 kona-perf + 内联块覆盖,
-#      导致提交的 defconfig 是"死代码")。
-#   2. 固定 clang-14 工具链版本, 构建更稳定可复现。
-#   3. 引入 ccache + GitHub Actions 缓存, 重复构建显著加速。
-#   4. 增加 concurrency 防止重复运行互相覆盖。
-#   5. 构建成功后自动创建 GitHub Release (打标签 + 变更说明), 实现"发布"。
+# 本版新增: 内核自带完整 DTB (feature/builtin-dtb)
+#   背景问题: paladin 内核树里 arch/arm64/boot/dts/vendor 是一个指向
+#   ../../../../../../vendor/qcom/proprietary/devicetree-4.19 的符号链接,
+#   该路径位于 Android 源码树而非内核仓库内。CI 只 clone 内核仓库,
+#   因此这个链接始终悬空 -> dts/Makefile 的 wildcard 判断失败 ->
+#   vendor 子目录被跳过 -> 从来没有编译出任何 kona dtb。
+#   原先的 `|| echo "⚠️ DTB 编译跳过"` 与 `cp ... || true` 把这个事实静默吞掉了。
+#
+#   修复方式:
+#     1. 用真实的高通 devicetree-4.19 目录替换掉悬空符号链接;
+#     2. 把本仓库的 tb371fc.dts 覆盖进去, 并注册到 vendor/qcom/Makefile;
+#     3. defconfig 开启 BUILD_ARM64_APPENDED_DTB_IMAGE + IMG_DTB,
+#        产出 Image-dtb = Image + tb371fc.dtb, 实现"内核自带完整 dtb";
+#     4. 必须先 `make dtbs` 再单独 `make Image-dtb` ——
+#        因为 arch/arm64/boot/Makefile 里
+#        `DTB_OBJS := $(shell find $(obj)/dts/ -name \*.dtb)` 是立即求值,
+#        同一次 make 调用中 dtb 尚未生成, find 会返回空,
+#        导致拼接出一个不含任何 dtb 的空壳镜像。
 name: Build TB371FC Kernel
 
 on:
@@ -24,10 +35,8 @@ on:
     branches: [main]
     paths:
       - 'arch/arm64/configs/vendor/tb371fc_defconfig'
+      - 'arch/arm64/boot/dts/**'
       - '.github/workflows/build_tb371fc_sukisu.yml'
-      - 'vendor_drivers/**'
-      - 'patches/**'
-      - 'port/**'
 
 concurrency:
   group: tb371fc-kernel-${{ github.ref }}
@@ -36,11 +45,16 @@ concurrency:
 env:
   KERNEL_REPO: https://github.com/lss4/android_kernel_lenovo_paladin.git
   KERNEL_BRANCH: "11"
+  # 高通 devicetree-4.19 (vendor/qcom/proprietary) 的 GitHub 镜像。
+  # CodeLinaro 官方源需要登录, 匿名 clone 会 302 到 sign-in, 无法在 CI 使用。
+  QCOM_DT_REPO: https://github.com/ata-kaner/android_kernel_samsung_sm8250-devicetree.git
+  QCOM_DT_BRANCH: master
   EROFS_REPO: https://github.com/lateautumn233/erofs_kernel_4_19.git
   EROFS_BRANCH: linux-4.19.y
   ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3.git
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   CLANG_VERSION: "14"
+  TARGET_DTB: tb371fc
 
 jobs:
   build:
@@ -64,6 +78,7 @@ jobs:
             build-essential bc kmod cpio flex libncurses5-dev \
             libelf-dev libssl-dev dwarves bison python3 \
             python-is-python3 git curl wget zip unzip ccache \
+            device-tree-compiler \
             clang-${{ env.CLANG_VERSION }} clang lld-${{ env.CLANG_VERSION }} lld llvm \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
@@ -97,10 +112,104 @@ jobs:
           fi
           cp "$SRC" "$DST"
           echo "✅ 已使用仓库提交的 defconfig 作为唯一配置源"
-          # [FIX] 确保 CONFIG_KSU=y 存在，不再依赖 SukiSU setup.sh 的副作用
-          # (旧版仅靠 setup.sh 追加，仓库 defconfig 是死代码，setup 版本变动即静默不编 Root)
-          grep -q '^CONFIG_KSU=y' "$DST" || echo 'CONFIG_KSU=y' >> "$DST"
           grep -c '^CONFIG_' "$DST" | xargs echo "defconfig 配置项数量:"
+
+      # ---------------------------------------------------------------
+      # 内核自带完整 DTB: 步骤 1/3 —— 修复悬空的 vendor 符号链接
+      # ---------------------------------------------------------------
+      - name: Populate Qualcomm vendor device tree (fix dangling symlink)
+        run: |
+          set -e
+          DT_LINK="kernel/arch/arm64/boot/dts/vendor"
+
+          echo "--- 修复前的 vendor 路径状态 ---"
+          ls -ld "$DT_LINK" || true
+          if [ -L "$DT_LINK" ]; then
+            echo "符号链接指向: $(readlink "$DT_LINK")"
+            if [ ! -e "$DT_LINK" ]; then
+              echo "⚠️ 已确认为悬空符号链接 (这正是从来编不出 kona dtb 的根因)"
+            fi
+          fi
+
+          rm -rf "$DT_LINK"
+          git clone --depth=1 -b "${QCOM_DT_BRANCH}" "${QCOM_DT_REPO}" /tmp/qcom_dt
+          if [ ! -d /tmp/qcom_dt/vendor/qcom ]; then
+            echo "❌ 设备树仓库结构异常: 找不到 vendor/qcom"
+            exit 1
+          fi
+          cp -R /tmp/qcom_dt/vendor "$DT_LINK"
+          rm -rf /tmp/qcom_dt "$DT_LINK/.git"
+
+          # 校验关键 dtsi 是否齐备 (tb371fc.dts 的 include 依赖)
+          MISSING=0
+          for f in kona.dtsi kona-pinctrl.dtsi kona-pm.dtsi kona-regulators.dtsi \
+                   kona-pmic-overlay.dtsi kona-qupv3.dtsi kona-sde-display.dtsi \
+                   kona-audio.dtsi; do
+            if [ -f "$DT_LINK/qcom/$f" ]; then
+              echo "  ✅ $f"
+            else
+              echo "  ❌ 缺失 $f"
+              MISSING=1
+            fi
+          done
+          [ "$MISSING" -eq 0 ] || { echo "❌ 依赖的 dtsi 不完整, 终止"; exit 1; }
+          echo "vendor/qcom dtsi 文件总数: $(ls "$DT_LINK/qcom" | wc -l)"
+          echo "=== 高通 vendor 设备树就位 ==="
+
+      # ---------------------------------------------------------------
+      # 内核自带完整 DTB: 步骤 2/3 —— 覆盖本仓库 dts 并注册到 Makefile
+      # ---------------------------------------------------------------
+      - name: Overlay repository device tree sources
+        run: |
+          set -e
+          SRC_DIR="$GITHUB_WORKSPACE/arch/arm64/boot/dts/vendor/qcom"
+          DST_DIR="kernel/arch/arm64/boot/dts/vendor/qcom"
+
+          if [ ! -d "$SRC_DIR" ]; then
+            echo "❌ 仓库内找不到 $SRC_DIR"
+            exit 1
+          fi
+          cp -v "$SRC_DIR"/*.dts "$SRC_DIR"/*.dtsi "$DST_DIR"/ 2>/dev/null || \
+            cp -v "$SRC_DIR"/*.dts "$DST_DIR"/
+          echo "✅ 已覆盖本仓库设备树源文件"
+
+          # 注册 tb371fc.dtb。注意必须在追加 dtb-y 之后重新声明 always,
+          # 否则 Makefile 末尾已展开的 always 不会包含新目标。
+          MK="$DST_DIR/Makefile"
+          if ! grep -q "${TARGET_DTB}.dtb" "$MK"; then
+            {
+              echo ""
+              echo "# --- Lenovo TB371FC (自带完整 dtb) ---"
+              echo "dtb-\$(CONFIG_ARCH_KONA) += ${TARGET_DTB}.dtb"
+              echo "always := \$(dtb-y)"
+            } >> "$MK"
+            echo "✅ 已把 ${TARGET_DTB}.dtb 注册进 vendor/qcom/Makefile"
+          else
+            echo "ℹ️ Makefile 中已存在 ${TARGET_DTB}.dtb, 跳过"
+          fi
+          tail -6 "$MK"
+
+          # 语法预检: 先用 dtc 单独跑一遍预处理+编译, 让报错更早更清晰
+          echo "--- dtc 预检 ---"
+          cd kernel
+          if cpp -nostdinc -undef -x assembler-with-cpp \
+                -I arch/arm64/boot/dts/vendor \
+                -I arch/arm64/boot/dts/vendor/bindings \
+                -I include \
+                arch/arm64/boot/dts/vendor/qcom/${TARGET_DTB}.dts \
+                -o /tmp/${TARGET_DTB}.pre.dts 2>/tmp/cpp.log; then
+            if dtc -I dts -O dtb -o /tmp/${TARGET_DTB}.probe.dtb \
+                   /tmp/${TARGET_DTB}.pre.dts 2>/tmp/dtc.log; then
+              echo "✅ dtc 预检通过: $(ls -lh /tmp/${TARGET_DTB}.probe.dtb | awk '{print $5}')"
+            else
+              echo "⚠️ dtc 预检有告警/错误 (不阻断, 以 kbuild 结果为准):"
+              head -40 /tmp/dtc.log
+            fi
+          else
+            echo "⚠️ cpp 预处理失败 (不阻断):"
+            head -40 /tmp/cpp.log
+          fi
+          cd ..
 
       - name: Setup SukiSU-Ultra
         run: |
@@ -149,12 +258,6 @@ jobs:
         run: |
           cd kernel
           rm -rf fs/erofs erofs_tmp
-          # [FIX] 移除 paladin 内置 drivers/staging/erofs：其 Kconfig 同样定义 EROFS_FS 符号，
-          # 与下方克隆的新版 fs/erofs 冲突，会导致 Kconfig "symbol redefined" 及链接期
-          # multiple definition of erofs_fs_type，构建 100% 失败。
-          rm -rf drivers/staging/erofs
-          sed -i '/obj-\$(CONFIG_EROFS_FS).*+= erofs\//d' drivers/staging/Makefile 2>/dev/null || true
-          sed -i '/source "drivers\/staging\/erofs\/Kconfig"/d' drivers/staging/Kconfig 2>/dev/null || true
           mkdir -p include/linux
           git clone --depth=1 -b "${EROFS_BRANCH}" "${EROFS_REPO}" erofs_tmp
           if [ ! -d erofs_tmp/fs/erofs ]; then
@@ -224,36 +327,9 @@ jobs:
           cd ..
           echo "=== EROFS 4.19 适配移植完成 ==="
 
-      - name: Import TB371FC vendor drivers (ktz8866 backlight + touch compatible + DTS)
-        run: |
-          cd kernel
-          # 1) ktz8866 背光驱动 (paladin 缺失, 从 PocoF3 SM8250 4.19.325 内核提取, API 兼容)
-          cp "$GITHUB_WORKSPACE/vendor_drivers/drivers/video/backlight/ktz8866.c" drivers/video/backlight/ktz8866.c
-          mkdir -p include/linux/platform_data
-          cp "$GITHUB_WORKSPACE/vendor_drivers/include/linux/platform_data/ktz8866.h" include/linux/platform_data/ktz8866.h
-          if ! grep -q 'ktz8866.o' drivers/video/backlight/Makefile; then
-            printf 'obj-$(CONFIG_BACKLIGHT_KTZ8866)\t\t+= ktz8866.o\n' >> drivers/video/backlight/Makefile
-          fi
-          if ! grep -q 'BACKLIGHT_KTZ8866' drivers/video/backlight/Kconfig; then
-            cat >> drivers/video/backlight/Kconfig << 'KTZ_EOF'
-
-          config BACKLIGHT_KTZ8866
-          	tristate "KTZ8866 Backlight"
-          	depends on I2C
-          	help
-          	  If you have a KTZ8866 say Y to enable the backlight driver.
-          KTZ_EOF
-          fi
-          # 2) 触摸 nt36xxx: 让驱动匹配固件 DTS 的 "novatek,NVT-ts-spi" (原驱动只认 "novatek,NVT-ts")
-          if [ -f "$GITHUB_WORKSPACE/patches/nt36xxx_compatible.patch" ]; then
-            git apply --ignore-whitespace "$GITHUB_WORKSPACE/patches/nt36xxx_compatible.patch" 2>/dev/null || \
-            patch -p1 < "$GITHUB_WORKSPACE/patches/nt36xxx_compatible.patch" 2>/dev/null || \
-            echo "⚠️ nt36xxx 兼容补丁未应用(可能已合入)"
-          fi
-          # 3) 设备树:沿用原厂 dtbo,不注入自定义 dtsi(如需自带 dtb 见本地 port/tb371fc.dtsi)
-          cd ..
-          echo "=== TB371FC vendor 驱动导入完成 ==="
-
+      # ---------------------------------------------------------------
+      # 内核自带完整 DTB: 步骤 3/3 —— 分阶段构建 Image / dtbs / Image-dtb
+      # ---------------------------------------------------------------
       - name: Build Kernel with Clang (ccache enabled)
         run: |
           cd kernel
@@ -271,30 +347,87 @@ jobs:
           set -o pipefail
 
           # 使用 LLVM_IAS=0 禁用 Clang 内置汇编器，改用 GNU as
-          make O="${OUT_DIR}" vendor/tb371fc_defconfig CC="${CC}" LLVM=1 LLVM_IAS=0
+          MAKE_ARGS="O=${OUT_DIR} CC=${CC} LLVM=1 LLVM_IAS=0"
 
-          for cfg in CONFIG_KSU CONFIG_EROFS_FS CONFIG_OVERLAY_FS CONFIG_KPROBES CONFIG_PID_NS; do
+          make ${MAKE_ARGS} vendor/tb371fc_defconfig
+
+          for cfg in CONFIG_KSU CONFIG_EROFS_FS CONFIG_OVERLAY_FS CONFIG_KPROBES \
+                     CONFIG_PID_NS CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE \
+                     CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES; do
             grep "^${cfg}=" "${OUT_DIR}/.config" || echo "  ${cfg}=NOT_FOUND"
           done
 
-          make -j"$(nproc)" O="${OUT_DIR}" Image CC="${CC}" LLVM=1 LLVM_IAS=0
-          make -j"$(nproc)" O="${OUT_DIR}" dtbs CC="${CC}" LLVM=1 LLVM_IAS=0 || echo "⚠️ DTB 编译跳过"
-          make -j"$(nproc)" O="${OUT_DIR}" modules CC="${CC}" LLVM=1 LLVM_IAS=0 || echo "⚠️ modules 编译跳过"
+          # (1) 先编内核本体
+          make -j"$(nproc)" ${MAKE_ARGS} Image
+
+          # (2) 再编设备树。DTB_LIST 已由 defconfig 的
+          #     CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES 收窄为仅本机型。
+          make -j"$(nproc)" ${MAKE_ARGS} dtbs
+
+          DTB_PATH="${OUT_DIR}/arch/arm64/boot/dts/vendor/qcom/${TARGET_DTB}.dtb"
+          if [ ! -f "$DTB_PATH" ]; then
+            echo "❌ ${TARGET_DTB}.dtb 未生成, 以下是实际产出的 dtb:"
+            find "${OUT_DIR}/arch/arm64/boot/dts" -name '*.dtb' | head -30
+            exit 1
+          fi
+          echo "✅ DTB 已生成: $(ls -lh "$DTB_PATH" | awk '{print $5}')"
+
+          # (3) 清掉无关 dtb, 保证 Image-dtb 只拼接本机型设备树。
+          #     Image-dtb 的 DTB_OBJS 用的是 `find dts/ -name *.dtb`,
+          #     不是 DTB_LIST, 任何残留 dtb 都会被一起拼进去。
+          find "${OUT_DIR}/arch/arm64/boot/dts" -name '*.dtb' \
+               ! -name "${TARGET_DTB}.dtb" -print -delete
+          echo "拼接前保留的 dtb:"
+          find "${OUT_DIR}/arch/arm64/boot/dts" -name '*.dtb'
+
+          # (4) 单独一次 make 调用生成 Image-dtb。
+          #     必须与上面的 dtbs 分开, 因为 DTB_OBJS 是 := 立即求值,
+          #     同一次调用里 find 看不到刚生成的 dtb。
+          make -j"$(nproc)" ${MAKE_ARGS} Image-dtb
+
+          make -j"$(nproc)" ${MAKE_ARGS} modules || echo "⚠️ modules 编译跳过"
           mkdir -p "${OUT_DIR}/modules"
-          make O="${OUT_DIR}" modules_install INSTALL_MOD_PATH="${OUT_DIR}/modules" CC="${CC}" LLVM=1 LLVM_IAS=0 || true
+          make ${MAKE_ARGS} modules_install \
+               INSTALL_MOD_PATH="${OUT_DIR}/modules" || true
           cd ..
           echo "===== 内核编译完成 ====="
 
-      - name: Check compiled kernel image
+      - name: Check compiled kernel image and built-in DTB
         run: |
-          if [ -f out/arch/arm64/boot/Image ]; then
-            echo "✅ Image: $(ls -lh out/arch/arm64/boot/Image)"
-          else
-            echo "❌ Image not found"
+          set -e
+          IMG="out/arch/arm64/boot/Image"
+          IMGDTB="out/arch/arm64/boot/Image-dtb"
+          DTB="out/arch/arm64/boot/dts/vendor/qcom/${TARGET_DTB}.dtb"
+
+          [ -f "$IMG" ] || { echo "❌ Image not found"; exit 1; }
+          echo "✅ Image     : $(stat -c%s "$IMG") bytes"
+
+          [ -f "$DTB" ] || { echo "❌ ${TARGET_DTB}.dtb not found"; exit 1; }
+          echo "✅ DTB       : $(stat -c%s "$DTB") bytes"
+
+          [ -f "$IMGDTB" ] || { echo "❌ Image-dtb not found"; exit 1; }
+          echo "✅ Image-dtb : $(stat -c%s "$IMGDTB") bytes"
+
+          # 断言 Image-dtb 确实比 Image 大, 即 dtb 真的被拼接进去了。
+          # 这是防止再次出现"静默产出空壳镜像"的关键门禁。
+          SZ_IMG=$(stat -c%s "$IMG")
+          SZ_DTB=$(stat -c%s "$DTB")
+          SZ_CAT=$(stat -c%s "$IMGDTB")
+          if [ "$SZ_CAT" -le "$SZ_IMG" ]; then
+            echo "❌ Image-dtb ($SZ_CAT) 未大于 Image ($SZ_IMG), DTB 没有被拼接进去!"
             exit 1
           fi
-          ls out/arch/arm64/boot/dts/vendor/qcom/kona*.dtb 2>/dev/null && echo "✅ DTB exists" || echo "⚠️ No DTB"
-          # 记录内核版本供 Release 使用
+          echo "✅ 拼接校验通过: Image-dtb 比 Image 大 $((SZ_CAT - SZ_IMG)) bytes (dtb 自身 $SZ_DTB bytes)"
+
+          # 校验 dtb 的 FDT magic 与 model 字段
+          dtc -I dtb -O dts "$DTB" -o /tmp/verify.dts 2>/dev/null || true
+          if [ -f /tmp/verify.dts ]; then
+            echo "--- DTB 根节点信息 ---"
+            grep -m1 'model' /tmp/verify.dts || true
+            grep -m1 'compatible' /tmp/verify.dts || true
+            grep -m1 'msm-id' /tmp/verify.dts || true
+          fi
+
           if [ -f out/include/config/kernel.release ]; then
             echo "KERNEL_VER=$(cat out/include/config/kernel.release)" >> "$GITHUB_ENV"
           else
@@ -303,31 +436,40 @@ jobs:
 
       - name: Package kernel with AnyKernel3
         run: |
+          set -e
           git clone --depth=1 "${ANYKERNEL_REPO}" anykernel
-          cp out/arch/arm64/boot/Image anykernel/
-          # ---- 设备树 --------------------------------------------------------
-          # 沿用设备原有 boot.img 的 dtb 段（原厂 dtb/dtbo），不注入自定义 DTB。
-          # paladin 树无 kona board dts，内核不自产 DTB；驱动侧已通过 compatible
-          # 补丁 (nt36xxx / ktz8866) 匹配原厂 dtbo 节点，由 ABL 叠加 dtbo#07 点亮硬件。
-          echo "ℹ️ 沿用原厂 dtb/dtbo（不注入自定义 DTB）"
+
+          # AnyKernel3 会优先识别 Image-dtb, 刷入后内核自带完整设备树,
+          # 不再依赖设备原有 dtbo 分区。
+          cp out/arch/arm64/boot/Image-dtb anykernel/
+          cp "out/arch/arm64/boot/dts/vendor/qcom/${TARGET_DTB}.dtb" anykernel/dtb
+
           mkdir -p anykernel/modules
           find out/modules -name "*.ko" -exec cp {} anykernel/modules/ \; 2>/dev/null || true
           cd anykernel
           if grep -q 'kernel.string=' anykernel.sh 2>/dev/null; then
-            sed -i 's|kernel.string=.*|kernel.string=TB371FC-SukiSU-EROFS|' anykernel.sh
+            sed -i 's|kernel.string=.*|kernel.string=TB371FC-SukiSU-EROFS-BuiltinDTB|' anykernel.sh
           else
-            echo "kernel.string=TB371FC-SukiSU-EROFS" >> anykernel.sh
+            echo "kernel.string=TB371FC-SukiSU-EROFS-BuiltinDTB" >> anykernel.sh
           fi
           sed -i 's|do.devicecheck=1|do.devicecheck=0|' anykernel.sh 2>/dev/null || true
           zip -r9 ../TB371FC_kernel.zip .
           cd ..
           echo "✅ 打包完成：$(ls -lh TB371FC_kernel.zip)"
+          unzip -l TB371FC_kernel.zip | grep -E "Image-dtb|dtb" || true
 
       - name: Upload kernel zip artifact
         uses: actions/upload-artifact@v4
         with:
           name: TB371FC_SukiSU_EROFS_Kernel
           path: TB371FC_kernel.zip
+          retention-days: 90
+
+      - name: Upload standalone DTB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TB371FC_dtb
+          path: out/arch/arm64/boot/dts/vendor/qcom/${{ env.TARGET_DTB }}.dtb
           retention-days: 90
 
       - name: Publish GitHub Release
@@ -338,25 +480,20 @@ jobs:
           name: "TB371FC Kernel ${{ env.KERNEL_VER }} (build ${{ github.run_id }})"
           files: TB371FC_kernel.zip
           body: |
-            ## TB371FC 安卓内核构建 (SukiSU-Ultra + EROFS)
+            ## TB371FC 安卓内核构建 (SukiSU-Ultra + EROFS + 自带完整 DTB)
 
             - **内核版本**: `${{ env.KERNEL_VER }}`
             - **设备**: 联想小新 Pad Pro 12.7 (TB371FC) / SM8250 骁龙 870
             - **集成**: SukiSU-Ultra (KernelSU Root + KPM)、EROFS (LZ4)、Android 16 兼容
             - **编译**: Clang ${{ env.CLANG_VERSION }} + ccache
+            - **镜像形态**: `Image-dtb` (Image + tb371fc.dtb 拼接, 内核自带完整设备树)
 
-            ### 本次优化要点
-            - 仓库 `tb371fc_defconfig` 现为唯一配置源 (修复旧版被覆盖的死代码问题)
-            - 关闭发布版调试选项 (DEBUG_INFO / CORESIGHT / IOMMU_DEBUG / DEBUG_LIST / IPA_UT)
-            - 启用 `CONFIG_PID_NS` 与 schedutil 默认调频
-            - 去除 defconfig 重复符号, 补全 `CONFIG_KSU` / `CONFIG_CRYPTO_LZ4`
-            - 移除 `drivers/staging/erofs`, 消除与 `fs/erofs` 的符号冲突
-            - 移植 KTZ8866 双背光驱动, 修正 nt36xxx 触摸 `compatible` 匹配
-
-            ### 设备树
-            本版本 **沿用设备原厂 dtb/dtbo**（paladin 树无 kona board dts，内核不自产 DTB）。
-            内核侧已通过 compatible 补丁 (nt36xxx 触摸 / ktz8866 双背光) 与原厂 `dtbo.img#07`
-            (TB371FC/spinel) 节点匹配，刷机后由 ABL 叠加原厂 dtbo 正常点亮硬件。
+            ### 本次变更要点
+            - 修复 `arch/arm64/boot/dts/vendor` 悬空符号链接导致**从未编译出任何 kona dtb** 的问题
+            - 新增板级设备树 `vendor/qcom/tb371fc.dts` 并注册进 Makefile
+            - defconfig 启用 `BUILD_ARM64_APPENDED_DTB_IMAGE` + `IMG_DTB`
+            - 构建流程拆分为 `Image` → `dtbs` → `Image-dtb` 三阶段, 规避 `DTB_OBJS` 立即求值陷阱
+            - 新增拼接体积断言门禁, 杜绝静默产出空壳镜像
 
             刷入方式: TWRP / 自定义 Recovery 卡刷 `TB371FC_kernel.zip`。
         env:

@@ -1,0 +1,892 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Lenovo TB371FC (Xiaoxin Pad Pro 12.7, codename "spinel") board device tree
+ *
+ * Hardware summary (all values below are cross-verified against the stock
+ * firmware, see "Provenance"):
+ *   SoC:      Qualcomm Snapdragon 870 (SM8250-AC / Kona v2.1)
+ *   RAM:      8 GB LPDDR5
+ *   Storage:  UFS 3.1 + micro SD (sdhc_2, CD = tlmm 14, PWR = tlmm 75)
+ *   Display:  BOE NT36532 DSC 2944x1840 dual-DSI video panel, 30/60/120/144 Hz
+ *   Backlight:2x KTZ8866 (qupv3_se5_i2c@0x11 + qupv3_se11_i2c@0x11)
+ *   Touch:    Novatek NVT-ts on SPI (qupv3_se14_spi), pen supported
+ *   Audio:    kona-qrd-snd-card = WCD938x headset codec (SoundWire, WSA
+ *             disabled) + 4x TFA98xx speaker amps on qupv3_se15_i2c via
+ *             primary TDM/MI2S
+ *   USB-C:    FSA4480 analog audio / DP-AUX switch on qupv3_se19_i2c@0x42
+ *   Sensors:  accel / gyro / ALS / mag are owned by the SLPI co-processor
+ *             (qcom,msm-ssc-sensors) and therefore have NO Linux DT nodes.
+ *             Only the hall sensor (isentek OCH8801) is on the AP I2C bus.
+ *   Fuel gauge: Mitsumi MM8013C06 on qupv3_se3_i2c@0x55
+ *   Camera:   2x generic qcom,cam-sensor (cci0 front-ish / cci1), no flash
+ *   Fingerprint: Goodix, GPIO/SPI attached, node lives directly under /soc
+ *   Keyboard: pogo-pin HID-over-I2C MCU on qupv3_se13_i2c@0x60
+ *   WiFi/BT:  QCA6390 (CNSS over PCIe + UART BT)
+ *   Keys:     volume-up only, on PM8150 GPIO6 (there is NO volume-down GPIO)
+ *
+ * Provenance
+ * ----------
+ *   [dtbo#7]  Evil-Freedom/tb371fc_firmware :: dtbo.img overlay entry #07
+ *             (qcom,board-id = <65567 1>, HDK-derived Lenovo board overlay).
+ *             Values were read out of the raw FDT (fragment@N/__overlay__ plus
+ *             __fixups__/__local_fixups__), not guessed.
+ *   [base]    Evil-Freedom/tb371fc_firmware :: dtb.img fdt_0 (pure SoC tree,
+ *             board-id 0) - source of the nodes Lenovo put in their kona.dtsi
+ *             instead of the overlay (fsa4480, tfa98xx, cnss-qca6390 ...).
+ *
+ * Anything that could not be backed by one of those two sources has been
+ * removed rather than invented; see the "REMOVED" notes inline.
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/input/input.h>
+
+/*
+ * kona.dtsi already pulls in kona-regulators / kona-pinctrl / kona-pm /
+ * kona-usb / kona-sde / camera/kona-camera / kona-qupv3 / kona-audio.
+ * Only the board-level overlays have to be added explicitly here, exactly the
+ * way the stock kona-*.dts board files do it.
+ */
+#include "kona.dtsi"
+#include "kona-sde-display.dtsi"
+/*
+ * [dtbo#7] fragment@56/@66 configure kona_snd and the overlay carries
+ * wcd938x + bolero nodes, so the QRD/MTP audio overlay IS required.
+ * WSA881x smart speakers are present in the overlay but switched off through
+ * qcom,wsa-max-devs = <0>; the real speakers are the 4x TFA98xx below.
+ */
+#include "kona-audio-overlay.dtsi"
+#include "kona-pmic-overlay.dtsi"
+
+/ {
+	model = "Lenovo TB371FC Xiaoxin Pad Pro 12.7";
+	compatible = "lenovo,tb371fc", "qcom,kona";
+
+	/* Kona v2.1 MSM-ID */
+	qcom,msm-id = <0x164 0x20001>;
+
+	/* [dtbo#7] board-id of the TB371FC board overlay */
+	qcom,board-id = <65567 1>;
+
+	aliases {
+		serial0 = &qupv3_se12_2uart;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+		/*
+		 * dtc has no C-style string concatenation, bootargs must stay on
+		 * a single line. The real cmdline comes from BOARD_KERNEL_CMDLINE.
+		 */
+		bootargs = "androidboot.hardware=qcom androidboot.console=ttyMSM0 androidboot.memcg=1 lpm_levels.sleep_disabled=1 msm_rtb.filter=0x237 service_locator.enable=1 androidboot.usbcontroller=a600000.dwc3 swiotlb=2048";
+	};
+
+	/* Bootloader patches the real size in. */
+	memory {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x0 0x0>;
+	};
+
+	hwinfo: hwinfo {
+		compatible = "lenovo,hwinfo";
+		model = "TB371FC";
+	};
+};
+
+/* ------------------------------------------------------------------------
+ * Board specific pinctrl additions
+ * ------------------------------------------------------------------------ */
+
+&tlmm {
+	/*
+	 * [dtbo#7] fragment@49 - CAM_RESET2 pin state for the second camera.
+	 * Not present in the generic kona-pinctrl.dtsi.
+	 */
+	cam_sensor_active_rst2: cam_sensor_active_rst2 {
+		mux {
+			pins = "gpio92";
+			function = "gpio";
+		};
+
+		config {
+			pins = "gpio92";
+			bias-disable;
+			drive-strength = <2>;
+		};
+	};
+
+	cam_sensor_suspend_rst2: cam_sensor_suspend_rst2 {
+		mux {
+			pins = "gpio92";
+			function = "gpio";
+		};
+
+		config {
+			pins = "gpio92";
+			bias-pull-down;
+			drive-strength = <2>;
+			output-low;
+		};
+	};
+};
+
+/*
+ * [base] The generic kona-pinctrl.dtsi puts storage_cd on gpio77 with no pull.
+ * On TB371FC gpio77 is the backlight ENP line and card-detect is gpio14 with a
+ * pull-up, so the pin state has to be re-pointed or the two drivers fight over
+ * the same pad.
+ */
+&storage_cd {
+	mux {
+		pins = "gpio14";
+	};
+
+	config {
+		pins = "gpio14";
+		/delete-property/ bias-disable;
+		bias-pull-up;
+		drive-strength = <2>;
+	};
+};
+
+/* [dtbo#7] fragment@0 - volume-up key sits on a PM8150 GPIO, not on TLMM. */
+&pm8150_gpios {
+	key_vol_up {
+		key_vol_up_default: key_vol_up_default {
+			pins = "gpio6";
+			function = "normal";
+			input-enable;
+			bias-pull-up;
+			power-source = <1>;
+		};
+	};
+};
+
+/* ------------------------------------------------------------------------
+ * Storage
+ * ------------------------------------------------------------------------ */
+
+&ufshc_mem {
+	status = "okay";
+};
+
+&ufsphy_mem {
+	compatible = "qcom,ufs-phy-qmp-v4";
+	status = "okay";
+};
+
+/* [dtbo#7] fragment@80 */
+&sdhc_2 {
+	vdd-supply = <&pm8150a_l9>;
+	qcom,vdd-voltage-level = <2950000 2960000>;
+	qcom,vdd-current-level = <200 800000>;
+	qcom,vdd-always-on;
+
+	vdd-io-supply = <&pm8150a_l6>;
+	qcom,vdd-io-voltage-level = <1808000 2960000>;
+	qcom,vdd-io-current-level = <200 22000>;
+
+	pinctrl-names = "active", "sleep";
+	pinctrl-0 = <&sdc2_clk_on &sdc2_cmd_on &sdc2_data_on &storage_cd>;
+	pinctrl-1 = <&sdc2_clk_off &sdc2_cmd_off &sdc2_data_off &storage_cd>;
+
+	/* flag cell is 0 in the stock overlay - keep it bit-identical */
+	cd-gpios = <&tlmm 14 0>;
+	pwr-gpios = <&tlmm 75 0>;
+
+	status = "okay";
+};
+
+/* ------------------------------------------------------------------------
+ * Serial console
+ * ------------------------------------------------------------------------ */
+
+/* [dtbo#7] fragment@62 */
+&qupv3_se12_2uart {
+	status = "okay";
+};
+
+/* ------------------------------------------------------------------------
+ * USB / Type-C
+ * ------------------------------------------------------------------------ */
+
+/*
+ * REMOVED: the old dr_mode = "peripheral" override. [dtbo#7] does not touch
+ * usb0 at all and [base] keeps the kona.dtsi default dr_mode = "drd", which is
+ * what a Type-C tablet with role switching needs.
+ */
+&usb0 {
+	status = "okay";
+};
+
+&usb2_phy0 {
+	status = "okay";
+};
+
+/* [dtbo#7] fragment@83 + fragment@90 */
+&usb1 {
+	qcom,default-mode-none;
+	qcom,ignore-wakeup-src-in-hostmode;
+
+	dwc3@a800000 {
+		dr_mode = "host";
+	};
+};
+
+/*
+ * [base] FSA4480 analog audio / DP-AUX switch.
+ * It lives on qupv3_se19_i2c (i2c@894000), NOT on qupv3_se2_i2c as previously
+ * assumed, and its compatible string is "qcom,fsa4480-i2c".
+ */
+&qupv3_se19_i2c {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	fsa4480: fsa4480@42 {
+		compatible = "qcom,fsa4480-i2c";
+		reg = <0x42>;
+	};
+};
+
+/* [dtbo#7] fragment@43 - DP over Type-C uses the FSA4480 as AUX switch. */
+&sde_dp {
+	qcom,dp-aux-switch = <&fsa4480>;
+	qcom,usbplug-cc-gpio = <&tlmm 65 0>;
+	pinctrl-names = "mdss_dp_active", "mdss_dp_sleep";
+	pinctrl-0 = <&sde_dp_usbplug_cc_active>;
+	pinctrl-1 = <&sde_dp_usbplug_cc_suspend>;
+};
+
+/* ------------------------------------------------------------------------
+ * Bluetooth / WiFi (QCA6390)
+ * ------------------------------------------------------------------------ */
+
+/* [dtbo#7] fragment@81 */
+&vendor {
+	bluetooth: bt_qca6390 {
+		compatible = "qca,qca6390";
+		pinctrl-names = "default";
+		pinctrl-0 = <&bt_en_sleep>;
+		qca,bt-reset-gpio = <&tlmm 21 0>;
+		qca,bt-sw-ctrl-gpio = <&tlmm 124 0>;
+		qca,bt-vdd-aon-supply = <&pm8150_s6>;
+		/* corrected: stock uses pm8150_s6 here as well, not pm8009_s2 */
+		qca,bt-vdd-dig-supply = <&pm8150_s6>;
+		qca,bt-vdd-rfa1-supply = <&pm8150_s5>;
+		qca,bt-vdd-rfa2-supply = <&pm8150a_s8>;
+		qca,bt-vdd-asd-supply = <&pm8150_l16>;
+		status = "okay";
+	};
+};
+
+/*
+ * [base] kona.dtsi in this tree declares the CNSS node as QCA6490.
+ * TB371FC ships a QCA6390, and the stock tree adds the BT_EN / SW_CTRL pins.
+ * REMOVED: the previous hand-written qcom,cnss-qca6390 node under &vendor -
+ * the CNSS node belongs under /soc and already exists.
+ */
+&wlan {
+	compatible = "qcom,cnss-qca6390";
+	qcom,bt-en-gpio = <&tlmm 21 0>;
+	qcom,sw-ctrl-gpio = <&tlmm 124 0>;
+};
+
+/* ------------------------------------------------------------------------
+ * Display (BOE NT36532 DSC 3K dual-DSI video panel)
+ * ------------------------------------------------------------------------ */
+
+&sde_dsi {
+	qcom,dsi-default-panel = <&dsi_spinel_boe_nt36532_dsc_3k_vid>;
+	/* [dtbo#7] fragment@42 */
+	qcom,platform-te-gpio = <&tlmm 66 0>;
+	qcom,panel-te-source = <0>;
+	vdd-supply = <&pm8150a_l11>;
+	vddio-supply = <&pm8150_l14>;
+};
+
+/* [dtbo#7] fragment@39 - panel timings / init sequence extracted verbatim. */
+&soc {
+	dsi_spinel_boe_nt36532_dsc_3k_vid: qcom,mdss_dsi_spinel_boe_nt36532_dsc_3k_video {
+		compatible = "qcom,mdss-dsi-panel";
+		label = "spinel boe nt36532 dsc 3k video";
+		qcom,mdss-dsi-panel-name = "spinel_boe_nt36532_dsc_3k_video";
+		qcom,mdss-dsi-panel-type = "dsi_video_mode";
+		qcom,mdss-dsi-panel-framerate = <60>;
+		qcom,mdss-dsi-panel-width = <2944>;
+		qcom,mdss-dsi-panel-height = <1840>;
+		qcom,mdss-dsi-panel-clockrate = <0>;
+		qcom,mdss-dsi-virtual-channel-id = <0>;
+		qcom,mdss-dsi-stream = <0>;
+		qcom,mdss-dsi-panel-bpp = <24>;
+		qcom,mdss-dsi-border-color = <0 0 0>;
+
+		qcom,mdss-dsi-h-back-porch = <80>;
+		qcom,mdss-dsi-h-pulse-width = <32>;
+		qcom,mdss-dsi-h-front-porch = <160>;
+		qcom,mdss-dsi-v-back-porch = <20>;
+		qcom,mdss-dsi-v-pulse-width = <8>;
+		qcom,mdss-dsi-v-front-porch = <40>;
+
+		qcom,mdss-dsi-h-sync-skew = <0>;
+		qcom,mdss-dsi-h-left-border = <0>;
+		qcom,mdss-dsi-h-right-border = <0>;
+		qcom,mdss-dsi-v-top-border = <0>;
+		qcom,mdss-dsi-v-bottom-border = <0>;
+
+		qcom,mdss-dsi-bpp = <24>;
+		qcom,mdss-dsi-color-order = "rgb_swap_rgb";
+		qcom,mdss-dsi-underflow-color = <0xff>;
+
+		qcom,mdss-dsi-traffic-mode = "burst_mode";
+		qcom,mdss-dsi-lane-map = "lane_map_0123";
+		qcom,mdss-dsi-lane-0-state;
+		qcom,mdss-dsi-lane-1-state;
+		qcom,mdss-dsi-lane-2-state;
+		qcom,mdss-dsi-lane-3-state;
+
+		qcom,mdss-dsi-dma-trigger = "trigger_sw";
+		qcom,mdss-dsi-mdp-trigger = "none";
+		qcom,mdss-dsi-tx-eot-append;
+		qcom,mdss-dsi-wr-mem-start = <0x2c>;
+		qcom,mdss-dsi-wr-mem-continue = <0x3c>;
+
+		qcom,mdss-dsi-panel-phy-timings = [00 25 0a 0a 1b 18 0a 0a 0a 02 04 00 1f 0f];
+		qcom,mdss-dsi-panel-timings-phy-v2 = [1a 1f 05 06 03 02 04 a0
+						      1a 1f 05 06 03 02 04 a0
+						      1a 1f 05 06 03 02 04 a0
+						      1a 1f 05 06 03 02 04 a0
+						      1a 17 05 06 03 02 04 a0];
+
+		qcom,mdss-dsi-on-command = [39 01 00 00 00 00 02 ff 20 39 01 00 00 00 00 02 fb 01 39 01 00 00 00 00 02 32 72 39 01 00 00 00 00 02 ff 23 39 01 00 00 00 00 02 fb 01 39 01 00 00 00 00 02 75 03 39 01 00 00 00 00 02 76 07 39 01 00 00 00 00 02 7a cd 39 01 00 00 00 00 02 bc 04 39 01 00 00 00 00 02 ff 26 39 01 00 00 00 00 02 fb 01 39 01 00 00 00 00 04 19 1c 1d 16 39 01 00 00 00 00 04 1a db b1 a4 39 01 00 00 00 00 04 2a 1c 1d 16 39 01 00 00 00 00 04 2b d3 a9 9c 39 01 00 00 00 00 04 99 15 1e 04 39 01 00 00 00 00 04 9a 30 94 3b 39 01 00 00 00 00 04 9d 15 1e 04 39 01 00 00 00 00 04 9e 2a 8c 00 39 01 00 00 00 00 02 ff 10 39 01 00 00 00 00 02 fb 01 39 01 00 00 00 00 07 3b 03 b8 1a 0a 0a 00 39 01 00 00 00 00 02 ff 27 39 01 00 00 00 00 02 fb 01 39 01 00 00 00 00 02 13 06 39 01 00 00 00 00 02 d0 31 39 01 00 00 00 00 02 d1 84 39 01 00 00 00 00 02 d2 38 39 01 00 00 00 00 02 ff 25 39 01 00 00 00 00 02 fb 01 39 01 00 00 00 00 02 0f 20 39 01 00 00 00 00 02 ff 23 39 01 00 00 00 00 02 fb 01 39 01 00 00 00 00 04 bc 04 00 3c 39 01 00 00 00 00 02 ff 10 39 01 00 00 00 00 02 fb 01 05 01 00 00 78 00 02 11 00 05 01 00 00 64 00 02 29 00];
+		qcom,mdss-dsi-off-command = [05 01 00 00 0f 00 02 28 00 05 01 00 00 3c 00 02 10 00];
+		qcom,mdss-dsi-on-command-state = "dsi_lp_mode";
+		qcom,mdss-dsi-off-command-state = "dsi_hs_mode";
+
+		qcom,mdss-dsi-dsc-enable;
+		qcom,mdss-dsi-dsc-version = <0x11>;
+		qcom,mdss-dsi-dsc-scr-version = <0x0>;
+		qcom,mdss-dsi-slice-height = <20>;
+		qcom,mdss-dsi-slice-width = <1472>;
+		qcom,mdss-dsi-dsc-slice-per-pkt = <1>;
+		qcom,mdss-dsi-dsc-bit-per-component = <8>;
+		qcom,mdss-dsi-dsc-bit-per-pixel = <8>;
+
+		qcom,mdss-dsi-bl-pmic-control-type = "bl_ctrl_external";
+		qcom,mdss-dsi-bl-min-level = <1>;
+		qcom,mdss-dsi-bl-max-level = <2047>;
+		qcom,mdss-brightness-max-level = <2047>;
+
+		qcom,platform-reset-gpio = <&tlmm 69 0>;
+		qcom,mdss-dsi-reset-sequence = <1 10 0 10 1 10 0 10 1 10>;
+		/* dual-DSI: one panel driven by both controllers / PHYs */
+		qcom,mdss-dsi-panel-count = <2>;
+		qcom,dsi-ctrl-num = <0 1>;
+		qcom,dsi-phy-num = <0 1>;
+		qcom,dsi-supported-dfps-list = <120 144 60 30>;
+
+		qcom,mdss-dsi-display-timings {
+			timing@0 {
+				qcom,mdss-dsi-panel-width = <1472>;
+				qcom,mdss-dsi-panel-height = <1840>;
+				qcom,mdss-dsi-h-front-porch = <201>;
+				qcom,mdss-dsi-h-back-porch = <60>;
+				qcom,mdss-dsi-h-pulse-width = <12>;
+				qcom,mdss-dsi-v-front-porch = <26>;
+				qcom,mdss-dsi-v-back-porch = <182>;
+				qcom,mdss-dsi-v-pulse-width = <2>;
+				qcom,mdss-dsi-panel-framerate = <120>;
+				qcom,mdss-dsi-panel-clockrate = <0>;
+				qcom,mdss-dsi-panel-phy-timings = [00 25 0a 0a 1b 18 0a 0a 0a 02 04 00 1f 0f];
+				qcom,display-topology = <1 1 1>, <2 2 1>;
+				qcom,default-topology-index = <1>;
+			};
+		};
+	};
+};
+
+/* ------------------------------------------------------------------------
+ * Backlight - 2x Kinetic KTZ8866 (left / right half of the panel)
+ * [dtbo#7] fragment@86 (qupv3_se5_i2c) + fragment@87 (qupv3_se11_i2c)
+ * Both chips answer at 0x11 on their own bus and share the same control pins.
+ * ------------------------------------------------------------------------ */
+
+&qupv3_se5_i2c {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	ktz8866a: ktz8866@11 {
+		compatible = "ktz,ktz8866a";
+		reg = <0x11>;
+		ktz8866,hwen-gpio = <&tlmm 54 0>;
+		ktz8866,enp-gpio = <&tlmm 77 0>;
+		ktz8866,enn-gpio = <&tlmm 78 0>;
+		status = "okay";
+	};
+};
+
+&qupv3_se11_i2c {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	ktz8866b: ktz8866@11 {
+		compatible = "ktz,ktz8866b";
+		reg = <0x11>;
+		ktz8866,hwen-gpio = <&tlmm 54 0>;
+		ktz8866,enp-gpio = <&tlmm 77 0>;
+		ktz8866,enn-gpio = <&tlmm 78 0>;
+		status = "okay";
+	};
+};
+
+/* ------------------------------------------------------------------------
+ * Touch - Novatek NVT-ts, SPI attached (NOT I2C)
+ * [dtbo#7] fragment@70 -> &qupv3_se14_spi
+ * The stock node additionally carries ~40 kB of "novatek-mp-criteria-*"
+ * factory self-test limit tables; they are only used by the MP test tool and
+ * are intentionally left out here.
+ * ------------------------------------------------------------------------ */
+
+&qupv3_se14_spi {
+	status = "okay";
+
+	novatek@0 {
+		compatible = "novatek,NVT-ts-spi";
+		reg = <0>;
+		spi-max-frequency = <9600000>;
+		/* stock also lists the Tianma variant; only BOE is described here */
+		panel = <&dsi_spinel_boe_nt36532_dsc_3k_vid>;
+		novatek,reset-gpio = <&tlmm 56 0>;
+		novatek,irq-gpio = <&tlmm 68 0x2001>;
+		novatek,pen-support;
+		novatek,stylus-resol-double;
+		status = "okay";
+	};
+};
+
+/* ------------------------------------------------------------------------
+ * Hall sensor (screen cover detection)
+ * [dtbo#7] fragment@68 -> &qupv3_se9_i2c
+ *
+ * REMOVED: the previous accelerometer/ALS/magnetometer nodes on
+ * &qupv3_se3_i2c (bosch,bmi323 / ams,tcs3408 / qst,qmc630x). Neither [dtbo#7]
+ * nor [base] contains them - on this platform accel, gyro, ALS and mag are
+ * driven by the SLPI co-processor (qcom,msm-ssc-sensors) and never appear in
+ * the Linux device tree.
+ * ------------------------------------------------------------------------ */
+
+&qupv3_se9_i2c {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	dhall@18 {
+		compatible = "isentek,OCH8801-0";
+		reg = <0x18>;
+		data-range = <0>;
+		hall,bias_support = <0>;
+		hall,bias-ratio = <90>;
+		hall,irq-gpio = <&tlmm 158 0>;
+		status = "okay";
+	};
+};
+
+/* ------------------------------------------------------------------------
+ * Fuel gauge - Mitsumi MM8013C06
+ * [dtbo#7] fragment@74 -> &qupv3_se3_i2c
+ * REMOVED: the previous "maxim,mm8013"@0x58 node on &qupv3_se7_i2c.
+ * ------------------------------------------------------------------------ */
+
+&qupv3_se3_i2c {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	mm8013: mitsumi,mm8013@55 {
+		compatible = "mitsumi,mm8013c06";
+		reg = <0x55>;
+		status = "okay";
+	};
+};
+
+/* ------------------------------------------------------------------------
+ * NXP CTN730 (wireless charging / NFC controller)
+ * [dtbo#7] fragment@67 -> &qupv3_se1_i2c
+ * ------------------------------------------------------------------------ */
+
+&qupv3_se1_i2c {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	ctn730@28 {
+		compatible = "nxp,ctn730";
+		reg = <0x28>;
+		rst-gpios = <&tlmm 84 0>;
+		enable-gpios = <&tlmm 160 0>;
+		interrupt-gpios = <&tlmm 111 0>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <111 0>;
+		interrupt-names = "nfc_irq";
+	};
+
+	/*
+	 * [dtbo#7] fragment@93 also puts an LT9611UXC DSI->HDMI bridge at 0x2b
+	 * (irq gpio1 / reset gpio2). That is a leftover from the kona HDK
+	 * reference design this overlay was derived from - the retail tablet has
+	 * no HDMI connector - so it is kept for documentation but disabled to
+	 * avoid claiming gpio1/gpio2. Set status = "ok" if you actually have the
+	 * bridge wired up.
+	 */
+	lt9611: lt,lt9611@2b {
+		compatible = "lt,lt9611uxc";
+		reg = <0x2b>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <1 0>;
+		interrupt-names = "lt_irq";
+		lt,irq-gpio = <&tlmm 1 0>;
+		lt,reset-gpio = <&tlmm 2 0>;
+		lt,non-pluggable;
+		lt,preferred-mode = "1920x1080";
+		instance_id = <0>;
+		status = "disabled";
+	};
+};
+
+/* ------------------------------------------------------------------------
+ * Pogo-pin keyboard MCU (HID over I2C)
+ * [dtbo#7] fragment@69 -> &qupv3_se13_i2c
+ * ------------------------------------------------------------------------ */
+
+&qupv3_se13_i2c {
+	status = "okay";
+	clock-frequency = <1000000>;
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	mouse@60 {
+		compatible = "hid-over-i2c";
+		reg = <0x60>;
+		hid-descr-addr = <0x1>;
+		mcu_rst_gpio = <&tlmm 114 0>;
+		mcu_resume_gpio = <&tlmm 108 0>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <110 0>;
+		interrupt-names = "keyboard_irq";
+		post-power-on-delay-ms = <100>;
+	};
+};
+
+/* ------------------------------------------------------------------------
+ * Audio
+ * [dtbo#7] fragment@64 (dai_mi2s2), fragment@65 (MI2S/TDM pinctrl),
+ *          fragment@66 (kona_snd, wins over the MTP defaults)
+ * [base]   4x TFA98xx on qupv3_se15_i2c + RTC6226 FM tuner
+ * ------------------------------------------------------------------------ */
+
+&dai_mi2s2 {
+	qcom,msm-mi2s-tx-lines = <1>;
+};
+
+&q6core {
+	msm_cdc_pinctrl_pri: msm_cdc_pinctrl_pri {
+		compatible = "qcom,msm-cdc-pinctrl";
+		pinctrl-names = "aud_active", "aud_sleep";
+		pinctrl-0 = <&pri_tdm_clk_active &pri_tdm_sync_active
+			     &pri_tdm_din_active &pri_tdm_dout_active>;
+		pinctrl-1 = <&pri_tdm_clk_sleep &pri_tdm_sync_sleep
+			     &pri_tdm_din_sleep &pri_tdm_dout_sleep>;
+	};
+
+	msm_cdc_pinctrl_tert: msm_cdc_pinctrl_tert {
+		compatible = "qcom,msm-cdc-pinctrl";
+		pinctrl-names = "aud_active", "aud_sleep";
+		pinctrl-0 = <&tert_mi2s_sck_active &tert_mi2s_ws_active
+			     &tert_mi2s_sd0_active>;
+		pinctrl-1 = <&tert_mi2s_sck_sleep &tert_mi2s_ws_sleep
+			     &tert_mi2s_sd0_sleep>;
+	};
+};
+
+/*
+ * The card name is matched by the Android audio HAL (mixer_paths_*.xml /
+ * audio_platform_info_*.xml), so it must stay exactly what the stock overlay
+ * produces: "kona-qrd-snd-card".
+ */
+&kona_snd {
+	qcom,model = "kona-qrd-snd-card";
+	qcom,wsa-max-devs = <0>;
+	qcom,tdm-max-slots = <4>;
+	qcom,msm-mbhc-usbc-audio-supported = <1>;
+	qcom,msm-mbhc-hphl-swh = <0>;
+	qcom,msm-mbhc-gnd-swh = <0>;
+	qcom,pri-mi2s-gpios = <&msm_cdc_pinctrl_pri>;
+	status = "okay";
+};
+
+/* [base] speaker amplifiers - i2c@884000 */
+&qupv3_se15_i2c {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	tfa98xx_a: tfa98xx@34 {
+		compatible = "tfa,tfa98xx";
+		reg = <0x34>;
+		reset-gpio = <&tlmm 115 0>;
+	};
+
+	tfa98xx_b: tfa98xx@35 {
+		compatible = "tfa,tfa98xx";
+		reg = <0x35>;
+		reset-gpio = <&tlmm 117 0>;
+	};
+
+	tfa98xx_c: tfa98xx@36 {
+		compatible = "tfa,tfa98xx";
+		reg = <0x36>;
+		reset-gpio = <&tlmm 118 0>;
+	};
+
+	tfa98xx_d: tfa98xx@37 {
+		compatible = "tfa,tfa98xx";
+		reg = <0x37>;
+		reset-gpio = <&tlmm 116 0>;
+	};
+
+	/* [base] RTC6226 FM tuner shares the same bus */
+	fmradio: nq@64 {
+		compatible = "rtc6226";
+		reg = <0x64>;
+		fmint-gpio = <&tlmm 51 0>;
+		vdd-supply = <&pm8150a_bob>;
+		rtc6226,vdd-supply-voltage = <3300000 3300000>;
+		vio-supply = <&pm8150_s4>;
+		rtc6226,vio-supply-voltage = <1800000 1800000>;
+	};
+};
+
+/* ------------------------------------------------------------------------
+ * Camera
+ * [dtbo#7] fragment@50 -> &cam_cci0, fragment@51 -> &cam_cci1
+ * The stock overlay only uses the generic "qcom,cam-sensor" binding - the
+ * concrete sensor model is probed by the CamX/chi-cdk userspace, so there is
+ * no hi1339 / s5k4h7 node anywhere (those were invented and are REMOVED).
+ * The clock indices below are raw CAM_CC_MCLKn_CLK ids taken from the stock
+ * blob (dt-bindings/clock/qcom,camcc-kona.h).
+ * ------------------------------------------------------------------------ */
+
+&cam_cci0 {
+	actuator0: qcom,actuator0 {
+		cell-index = <0>;
+		compatible = "qcom,actuator";
+		cci-master = <0>;
+		cam_vaf-supply = <&pm8150a_l7>;
+		regulator-names = "cam_vaf";
+		rgltr-cntrl-support;
+		rgltr-min-voltage = <2800000>;
+		rgltr-max-voltage = <2800000>;
+		rgltr-load-current = <2800000>;
+	};
+
+	eeprom0: qcom,eeprom0 {
+		cell-index = <0>;
+		compatible = "qcom,eeprom";
+		cam_vio-supply = <&pm8150a_l5>;
+		cam_vana-supply = <&pm8150_l13>;
+		cam_vdig-supply = <&pm8150a_l3>;
+		cam_clk-supply = <&titan_top_gdsc>;
+		regulator-names = "cam_vio", "cam_vana", "cam_vdig", "cam_clk";
+		rgltr-cntrl-support;
+		pwm-switch;
+		rgltr-min-voltage = <1800000 2800000 1200000 0>;
+		rgltr-max-voltage = <1800000 2800000 1200000 0>;
+		rgltr-load-current = <120000 80000 1200000 0>;
+		gpio-no-mux = <0>;
+		pinctrl-names = "cam_default", "cam_suspend";
+		pinctrl-0 = <&cam_sensor_mclk0_active &cam_sensor_active_rear>;
+		pinctrl-1 = <&cam_sensor_mclk0_suspend &cam_sensor_suspend_rear>;
+		gpios = <&tlmm 94 0>, <&tlmm 93 0>;
+		gpio-reset = <1>;
+		gpio-req-tbl-num = <0 1>;
+		gpio-req-tbl-flags = <1 0>;
+		gpio-req-tbl-label = "CAMIF_MCLK0", "CAM_RESET0";
+		sensor-position = <0>;
+		sensor-mode = <0>;
+		cci-master = <0>;
+		clocks = <&clock_camcc 73>;
+		clock-names = "cam_clk";
+		clock-cntl-level = "turbo";
+		clock-rates = <24000000>;
+		status = "ok";
+	};
+
+	qcom,cam-sensor0 {
+		cell-index = <0>;
+		compatible = "qcom,cam-sensor";
+		csiphy-sd-index = <0>;
+		sensor-position-roll = <90>;
+		sensor-position-pitch = <0>;
+		sensor-position-yaw = <180>;
+		actuator-src = <&actuator0>;
+		eeprom-src = <&eeprom0>;
+		cam_vio-supply = <&pm8150a_l5>;
+		cam_vana-supply = <&pm8150_l13>;
+		cam_vdig-supply = <&pm8150a_l3>;
+		cam_clk-supply = <&titan_top_gdsc>;
+		regulator-names = "cam_vio", "cam_vana", "cam_vdig", "cam_clk";
+		rgltr-cntrl-support;
+		pwm-switch;
+		rgltr-min-voltage = <1800000 2800000 1200000 0>;
+		rgltr-max-voltage = <1800000 2800000 1200000 0>;
+		rgltr-load-current = <120000 80000 1200000 0>;
+		gpio-no-mux = <0>;
+		pinctrl-names = "cam_default", "cam_suspend";
+		pinctrl-0 = <&cam_sensor_mclk0_active &cam_sensor_active_rear>;
+		pinctrl-1 = <&cam_sensor_mclk0_suspend &cam_sensor_suspend_rear>;
+		gpios = <&tlmm 94 0>, <&tlmm 93 0>;
+		gpio-reset = <1>;
+		gpio-req-tbl-num = <0 1>;
+		gpio-req-tbl-flags = <1 0>;
+		gpio-req-tbl-label = "CAMIF_MCLK0", "CAM_RESET0";
+		sensor-mode = <0>;
+		cci-master = <0>;
+		clocks = <&clock_camcc 73>;
+		clock-names = "cam_clk";
+		clock-cntl-level = "turbo";
+		clock-rates = <24000000>;
+		status = "ok";
+	};
+};
+
+&cam_cci1 {
+	eeprom2: qcom,eeprom2 {
+		cell-index = <2>;
+		compatible = "qcom,eeprom";
+		cam_vio-supply = <&pm8150a_l5>;
+		cam_vana-supply = <&pm8150a_l4>;
+		cam_vdig-supply = <&pm8150a_l2>;
+		cam_clk-supply = <&titan_top_gdsc>;
+		regulator-names = "cam_vio", "cam_vana", "cam_vdig", "cam_clk";
+		rgltr-cntrl-support;
+		pwm-switch;
+		rgltr-min-voltage = <1800000 2800000 1100000 0>;
+		rgltr-max-voltage = <1800000 2800000 1100000 0>;
+		rgltr-load-current = <120000 80000 1200000 0>;
+		gpio-no-mux = <0>;
+		pinctrl-names = "cam_default", "cam_suspend";
+		pinctrl-0 = <&cam_sensor_mclk1_active &cam_sensor_active_rst2>;
+		pinctrl-1 = <&cam_sensor_mclk1_suspend &cam_sensor_suspend_rst2>;
+		gpios = <&tlmm 95 0>, <&tlmm 92 0>;
+		gpio-reset = <1>;
+		gpio-req-tbl-num = <0 1>;
+		gpio-req-tbl-flags = <1 0>;
+		gpio-req-tbl-label = "CAMIF_MCLK1", "CAM_RESET2";
+		sensor-position = <1>;
+		sensor-mode = <0>;
+		cci-master = <0>;
+		clocks = <&clock_camcc 75>;
+		clock-names = "cam_clk";
+		clock-cntl-level = "turbo";
+		clock-rates = <24000000>;
+		status = "ok";
+	};
+
+	qcom,cam-sensor2 {
+		cell-index = <2>;
+		compatible = "qcom,cam-sensor";
+		csiphy-sd-index = <1>;
+		sensor-position-roll = <270>;
+		sensor-position-pitch = <0>;
+		sensor-position-yaw = <0>;
+		eeprom-src = <&eeprom2>;
+		cam_vio-supply = <&pm8150a_l5>;
+		cam_vana-supply = <&pm8150a_l4>;
+		cam_vdig-supply = <&pm8150a_l2>;
+		cam_clk-supply = <&titan_top_gdsc>;
+		regulator-names = "cam_vio", "cam_vana", "cam_vdig", "cam_clk";
+		rgltr-cntrl-support;
+		pwm-switch;
+		rgltr-min-voltage = <1800000 2800000 1100000 0>;
+		rgltr-max-voltage = <1800000 2800000 1100000 0>;
+		rgltr-load-current = <120000 80000 1200000 0>;
+		gpio-no-mux = <0>;
+		pinctrl-names = "cam_default", "cam_suspend";
+		pinctrl-0 = <&cam_sensor_mclk1_active &cam_sensor_active_rst2>;
+		pinctrl-1 = <&cam_sensor_mclk1_suspend &cam_sensor_suspend_rst2>;
+		gpios = <&tlmm 95 0>, <&tlmm 92 0>;
+		gpio-reset = <1>;
+		gpio-req-tbl-num = <0 1>;
+		gpio-req-tbl-flags = <1 0>;
+		gpio-req-tbl-label = "CAMIF_MCLK1", "CAM_RESET2";
+		sensor-mode = <0>;
+		cci-master = <0>;
+		clocks = <&clock_camcc 75>;
+		clock-names = "cam_clk";
+		clock-cntl-level = "turbo";
+		clock-rates = <24000000>;
+		status = "ok";
+	};
+};
+
+/* ------------------------------------------------------------------------
+ * Fingerprint + volume key
+ * [dtbo#7] fragment@73 -> &soc
+ * The Goodix node is NOT an I2C client: it hangs directly off /soc and only
+ * uses GPIOs (the SPI transport is opened by the vendor HAL).
+ * REMOVED: the previous "goodix,fp"@0x28 node on &qupv3_se1_i2c.
+ * ------------------------------------------------------------------------ */
+
+&soc {
+	goodix_fp: goodix_fp {
+		compatible = "goodix,fingerprint";
+		interrupt-parent = <&tlmm>;
+		interrupts = <23 0>;
+		fp-gpio-irq = <&tlmm 23 0>;
+		fp-gpio-reset = <&tlmm 85 0>;
+		goodix_vdd-supply = <&pm8150a_l11>;
+		status = "okay";
+	};
+
+	gpio_keys {
+		compatible = "gpio-keys";
+		label = "gpio-keys";
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&key_vol_up_default>;
+
+		/*
+		 * REMOVED: vol_down. The stock overlay declares volume-up only -
+		 * on TB371FC volume-down is reported by the same rocker through
+		 * the embedded controller, there is no second GPIO.
+		 */
+		vol_up {
+			label = "volume_up";
+			gpios = <&pm8150_gpios 6 GPIO_ACTIVE_LOW>;
+			linux,input-type = <1>;
+			linux,code = <KEY_VOLUMEUP>;
+			gpio-key,wakeup;
+			debounce-interval = <15>;
+			linux,can-disable;
+		};
+	};
+};
+
+/* ------------------------------------------------------------------------
+ * Features not present on the retail tablet
+ * ------------------------------------------------------------------------ */
+
+/* Dual-DSI drives a single panel through sde_dsi, so the secondary display
+ * controller stays off. */
+&sde_dsi1 {
+	status = "disabled";
+};
+
+/* 60 GHz WiGig - HDK reference design leftover, no such radio on TB371FC.
+ * (The stock overlay leaves it enabled; disabling it here saves the probe.) */
+&wil6210 {
+	status = "disabled";
+};
